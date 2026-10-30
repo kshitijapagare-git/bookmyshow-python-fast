@@ -75,6 +75,14 @@ class MovieFormat(str, Enum):
     FOUR_D = "4DX"
 
 
+class SeatCategoryName(str, Enum):
+    NORMAL = "NORMAL"
+    EXECUTIVE = "EXECUTIVE"
+    PREMIUM = "PREMIUM"
+    PREMIUM_XL = "PREMIUM_XL"
+    PREMIUM_PLUS = "PREMIUM_PLUS"
+
+
 class MovieOut(BaseModel):
     id: int
     title: str
@@ -102,6 +110,18 @@ class MovieDetailOut(MovieOut):
 class Availability(str, Enum):
     AVAILABLE = "AVAILABLE"
     FAST_FILLING = "FAST_FILLING"
+
+
+class TimeOfDay(str, Enum):
+    MORNING = "MORNING"
+    AFTERNOON = "AFTERNOON"
+    EVENING = "EVENING"
+    NIGHT = "NIGHT"
+
+
+class ShowSort(str, Enum):
+    NAME = "NAME"
+    EARLIEST = "EARLIEST"
 
 
 class ShowOut(BaseModel):
@@ -137,7 +157,29 @@ class ShowMovieOut(BaseModel):
     genres: str
 
 
+class PriceBand(BaseModel):
+    min: int
+    max: int
+
+
+class AppliedFiltersOut(BaseModel):
+    priceMin: int | None = None
+    priceMax: int | None = None
+    timeOfDay: list[TimeOfDay] = Field(default_factory=list)
+    format: MovieFormat | None = None
+    cancellable: bool | None = None
+    wheelchair: bool | None = None
+    sort: ShowSort = ShowSort.NAME
+
+
+class AvailableFiltersOut(BaseModel):
+    priceBands: list[PriceBand]
+    formats: list[MovieFormat]
+
+
 class MovieShowsOut(BaseModel):
     movie: ShowMovieOut
     dates: list[ShowsDateOut]
     cinemas: list[CinemaShowsOut]
+    appliedFilters: AppliedFiltersOut
+    availableFilters: AvailableFiltersOut

@@ -1,11 +1,13 @@
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import Base, SessionLocal, engine
-from app.models import Cinema, City, Movie, Screen, Show
+from app.models import Cinema, City, Movie, Screen, SeatCategory, Show
+from app.schemas import SeatCategoryName
 from app.slug import slugify
 
 MOVIES: list[dict[str, object]] = [
@@ -234,9 +236,10 @@ SHOW_TIMES: tuple[time, ...] = (
 )
 
 SHOW_FORMATS: tuple[str, ...] = (
-    "2K LASER DOLBY 7.1",
-    "4K DOLBY ATMOS",
-    "IMAX LASER",
+    "2D",
+    "3D",
+    "4DX",
+    "IMAX",
 )
 
 # (seats_sold, capacity) stand-ins until MB-106 ships real seat counts.
@@ -339,6 +342,29 @@ def seed_screens(db: Session) -> None:
     db.commit()
 
 
+SEAT_CATEGORY_PRICES: dict[SeatCategoryName, Decimal] = {
+    SeatCategoryName.NORMAL: Decimal("180"),
+    SeatCategoryName.EXECUTIVE: Decimal("190"),
+    SeatCategoryName.PREMIUM: Decimal("210"),
+    SeatCategoryName.PREMIUM_XL: Decimal("250"),
+    SeatCategoryName.PREMIUM_PLUS: Decimal("230"),
+}
+
+
+def seed_seat_categories(db: Session) -> None:
+    if db.scalar(select(SeatCategory.id).limit(1)) is not None:
+        return
+
+    db.add_all(
+        [
+            SeatCategory(screen_id=screen.id, name=name, price=price)
+            for screen in db.scalars(select(Screen).order_by(Screen.id))
+            for name, price in SEAT_CATEGORY_PRICES.items()
+        ]
+    )
+    db.commit()
+
+
 def seed_shows(db: Session) -> None:
     if db.scalar(select(Show.id).limit(1)) is not None:
         return
@@ -394,6 +420,7 @@ def seed_all(db: Session) -> None:
     seed_cities(db)
     seed_cinemas(db)
     seed_screens(db)
+    seed_seat_categories(db)
     seed_shows(db)
 
 

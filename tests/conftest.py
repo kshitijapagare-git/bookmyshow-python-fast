@@ -9,7 +9,14 @@ from fastapi.testclient import TestClient
 
 from app.db import Base, SessionLocal, engine
 from app.main import app
-from seed import seed_cinemas, seed_cities, seed_movies, seed_screens, seed_shows
+from seed import (
+    seed_cinemas,
+    seed_cities,
+    seed_movies,
+    seed_screens,
+    seed_seat_categories,
+    seed_shows,
+)
 
 
 @pytest.fixture()
@@ -43,6 +50,7 @@ def seeded_shows() -> Iterator[TestClient]:
         seed_cities(db)
         seed_cinemas(db)
         seed_screens(db)
+        seed_seat_categories(db)
         seed_shows(db)
 
     yield TestClient(app)

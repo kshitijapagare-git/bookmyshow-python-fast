@@ -55,7 +55,13 @@ def test_shows_are_grouped_by_cinema_and_sorted(seeded_shows):
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"movie", "dates", "cinemas"}
+    assert set(body) == {
+        "movie",
+        "dates",
+        "cinemas",
+        "appliedFilters",
+        "availableFilters",
+    }
     assert body["movie"] == {
         "id": 1,
         "title": "Pehla Pyaar Doosri Baar",
@@ -71,10 +77,11 @@ def test_shows_are_grouped_by_cinema_and_sorted(seeded_shows):
     ]
 
     cinemas = body["cinemas"]
+    # The default sort is by cinema name.
     assert [cinema["name"] for cinema in cinemas] == [
-        "PVR Icon",
         "INOX Megaplex",
         "Maison PVR",
+        "PVR Icon",
     ]
     for cinema in cinemas:
         assert set(cinema) == CINEMA_FIELDS
@@ -224,8 +231,8 @@ def test_only_cinemas_of_the_requested_city_are_returned(seeded_shows):
 
     assert response.status_code == 200
     assert [cinema["name"] for cinema in response.json()["cinemas"]] == [
-        "PVR Pavilion",
         "INOX Bund Garden",
+        "PVR Pavilion",
     ]
 
 

@@ -1,11 +1,12 @@
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.db import SessionLocal
-from app.models import Movie, Screen, Show
+from app.models import Movie, Screen, SeatCategory, Show
 from seed import CITY_TIME_ZONE, seed_all, seed_cinemas, seed_cities
 
 
@@ -109,3 +110,46 @@ def test_a_screen_name_is_unique_per_cinema(client):
             db.commit()
 
         db.rollback()
+
+
+def test_seeded_seat_categories_fill_every_screen(client):
+    _seed_everything()
+
+    expected = {
+        "NORMAL": Decimal("180"),
+        "EXECUTIVE": Decimal("190"),
+        "PREMIUM": Decimal("210"),
+        "PREMIUM_XL": Decimal("250"),
+        "PREMIUM_PLUS": Decimal("230"),
+    }
+
+    with SessionLocal() as db:
+        screens = db.scalars(select(Screen).order_by(Screen.id)).all()
+        categories = db.scalars(select(SeatCategory)).all()
+
+    assert screens
+    prices: dict[int, dict[str, Decimal]] = {}
+    for category in categories:
+        prices.setdefault(category.screen_id, {})[category.name.value] = category.price
+
+    assert sorted(prices) == [screen.id for screen in screens]
+    assert all(screen_prices == expected for screen_prices in prices.values())
+
+    # Seeding again adds no duplicate rows for the same screen and category.
+    _seed_everything()
+
+    with SessionLocal() as db:
+        seeded_twice = db.scalars(select(SeatCategory)).all()
+
+    assert len(seeded_twice) == len(screens) * len(expected)
+
+
+def test_seeded_show_formats_are_declared_values(client):
+    _seed_everything()
+
+    with SessionLocal() as db:
+        formats = {show.format for show in db.scalars(select(Show))}
+
+    assert formats
+    assert formats <= {"2D", "3D", "4DX", "IMAX"}
+    assert len(formats) >= 2

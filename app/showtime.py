@@ -1,7 +1,9 @@
+from collections.abc import Iterable
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from .schemas import Availability
+from .schemas import Availability, PriceBand, TimeOfDay
 
 CITY_TIME_ZONE = ZoneInfo("Asia/Kolkata")
 
@@ -56,3 +58,33 @@ def is_late_night(starts_at: datetime) -> bool:
 def is_early_morning(starts_at: datetime) -> bool:
     """True for a show starting strictly before 9 AM in the city's time zone."""
     return local_start(starts_at).time() < time(9, 0)
+
+
+# The fixed price bands the price filter offers, as inclusive (min, max) rupees.
+PRICE_BANDS: tuple[tuple[int, int], ...] = ((0, 200), (201, 250), (251, 10000))
+
+
+def time_of_day(starts_at: datetime) -> TimeOfDay:
+    """Bucket a show start by the city's local wall clock.
+
+    Morning is before 12:00, afternoon runs to 16:00, evening to 20:00 and
+    night covers the rest of the day, so 20:00 exactly is night.
+    """
+    start = local_start(starts_at)
+    if start.hour < 12:
+        return TimeOfDay.MORNING
+    if start.hour < 16:
+        return TimeOfDay.AFTERNOON
+    if start.hour < 20:
+        return TimeOfDay.EVENING
+    return TimeOfDay.NIGHT
+
+
+def price_bands_for(prices: Iterable[Decimal]) -> list[PriceBand]:
+    """The fixed price bands that hold at least one of ``prices``."""
+    values = list(prices)
+    return [
+        PriceBand(min=low, max=high)
+        for low, high in PRICE_BANDS
+        if any(low <= value <= high for value in values)
+    ]
