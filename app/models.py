@@ -1,19 +1,24 @@
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
+    Enum,
     Float,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
+from .schemas import SeatCategoryName
 
 
 class City(Base):
@@ -77,6 +82,9 @@ class Screen(Base):
 
     cinema: Mapped[Cinema] = relationship(back_populates="screens")
     shows: Mapped[list["Show"]] = relationship(back_populates="screen")
+    seat_categories: Mapped[list["SeatCategory"]] = relationship(
+        back_populates="screen", cascade="all, delete-orphan"
+    )
 
 
 class Show(Base):
@@ -92,3 +100,27 @@ class Show(Base):
     seats_sold: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     screen: Mapped[Screen] = relationship(back_populates="shows")
+
+
+class SeatCategory(Base):
+    __tablename__ = "seat_categories"
+    __table_args__ = (
+        UniqueConstraint("screen_id", "name", name="uq_seat_categories_screen_name"),
+        CheckConstraint(
+            "price >= 1 AND price <= 10000", name="ck_seat_categories_price_range"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    screen_id: Mapped[int] = mapped_column(ForeignKey("screens.id"), nullable=False)
+    # create_constraint emits the CHECK over the enum values, so a name outside
+    # SeatCategoryName is rejected by the database rather than stored as text.
+    name: Mapped[SeatCategoryName] = mapped_column(
+        Enum(
+            SeatCategoryName, native_enum=False, create_constraint=True, length=20
+        ),
+        nullable=False,
+    )
+    price: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
+
+    screen: Mapped[Screen] = relationship(back_populates="seat_categories")
