@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Annotated
 
@@ -27,6 +27,13 @@ class CityOut(CityBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CinemaAmenity(str, Enum):
+    M_TICKET = "M_TICKET"
+    FOOD = "FOOD"
+    PARKING = "PARKING"
+    WHEELCHAIR = "WHEELCHAIR"
+
+
 class CinemaBase(BaseModel):
     name: NonBlank
     address: NonBlank
@@ -49,6 +56,9 @@ class CinemaOut(BaseModel):
     name: str
     address: str
     cityId: int
+    chainLogoUrl: str | None = None
+    cancellable: bool = False
+    amenities: list[CinemaAmenity] = Field(default_factory=list)
 
 
 class Certificate(str, Enum):
@@ -87,3 +97,47 @@ class MovieDetailOut(MovieOut):
     backdropUrl: str
     trailerUrl: str | None = None
     interestedCount: int = 0
+
+
+class Availability(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    FAST_FILLING = "FAST_FILLING"
+
+
+class ShowOut(BaseModel):
+    id: int
+    startsAt: datetime
+    format: str
+    language: str
+    availability: Availability
+    lateNight: bool
+    earlyMorning: bool
+
+
+class CinemaShowsOut(BaseModel):
+    id: int
+    name: str
+    address: str
+    chainLogoUrl: str | None = None
+    cancellable: bool = False
+    amenities: list[CinemaAmenity] = Field(default_factory=list)
+    shows: list[ShowOut]
+
+
+class ShowsDateOut(BaseModel):
+    date: date
+    hasShows: bool
+
+
+class ShowMovieOut(BaseModel):
+    id: int
+    title: str
+    durationMinutes: int
+    certificate: Certificate
+    genres: str
+
+
+class MovieShowsOut(BaseModel):
+    movie: ShowMovieOut
+    dates: list[ShowsDateOut]
+    cinemas: list[CinemaShowsOut]

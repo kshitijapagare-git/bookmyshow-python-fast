@@ -29,6 +29,9 @@ def _to_response(cinema: Cinema) -> CinemaOut:
         name=cinema.name,
         address=cinema.address,
         cityId=cinema.city_id,
+        chainLogoUrl=cinema.chain_logo_url,
+        cancellable=cinema.cancellable,
+        amenities=cinema.amenities,
     )
 
 
