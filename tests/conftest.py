@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.db import Base, SessionLocal, engine
 from app.main import app
-from seed import seed_movies
+from seed import seed_cinemas, seed_cities, seed_movies, seed_screens, seed_shows
 
 
 @pytest.fixture()
@@ -32,3 +32,19 @@ def city(client):
     response = client.post("/api/cities", json={"name": "Pune", "state": "Maharashtra"})
     assert response.status_code == 201
     return response.json()
+
+
+@pytest.fixture()
+def seeded_shows() -> Iterator[TestClient]:
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        seed_movies(db)
+        seed_cities(db)
+        seed_cinemas(db)
+        seed_screens(db)
+        seed_shows(db)
+
+    yield TestClient(app)
+
+    Base.metadata.drop_all(bind=engine)

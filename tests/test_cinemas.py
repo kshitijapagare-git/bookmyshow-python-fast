@@ -1,3 +1,11 @@
+import pytest
+from pydantic import ValidationError
+
+from app.db import SessionLocal
+from app.schemas import CinemaOut
+from seed import seed_cinemas, seed_cities
+
+
 def test_cinema_crud(client, city):
     created = client.post(
         "/api/cinemas",
@@ -10,6 +18,9 @@ def test_cinema_crud(client, city):
         "name": "PVR Icon",
         "address": "Phoenix Mall",
         "cityId": city["id"],
+        "chainLogoUrl": None,
+        "cancellable": False,
+        "amenities": [],
     }
 
     fetched = client.get(f"/api/cinemas/{cinema['id']}")
@@ -68,3 +79,31 @@ def test_missing_cinema_returns_404(client):
         == 404
     )
     assert client.delete("/api/cinemas/999").status_code == 404
+
+
+def test_seeded_cinemas_fill_the_new_fields(client):
+    with SessionLocal() as db:
+        seed_cities(db)
+        seed_cinemas(db)
+
+    allowed = {"M_TICKET", "FOOD", "PARKING", "WHEELCHAIR"}
+    cinemas = client.get("/api/cinemas").json()
+
+    assert len(cinemas) == 5
+    for cinema in cinemas:
+        assert cinema["chainLogoUrl"]
+        assert cinema["amenities"]
+        assert set(cinema["amenities"]) <= allowed
+    assert any(cinema["cancellable"] for cinema in cinemas)
+    assert any(not cinema["cancellable"] for cinema in cinemas)
+
+
+def test_amenity_outside_the_enum_is_rejected():
+    with pytest.raises(ValidationError):
+        CinemaOut(
+            id=1,
+            name="PVR Icon",
+            address="Phoenix Mall",
+            cityId=1,
+            amenities=["POPCORN"],
+        )

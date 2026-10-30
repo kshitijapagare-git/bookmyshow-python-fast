@@ -1,10 +1,11 @@
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import Base, SessionLocal, engine
-from app.models import Cinema, City, Movie
+from app.models import Cinema, City, Movie, Screen, Show
 from app.slug import slugify
 
 MOVIES: list[dict[str, object]] = [
@@ -177,33 +178,80 @@ CITIES: list[dict[str, str]] = [
     {"name": "Bengaluru", "state": "Karnataka"},
 ]
 
-CINEMAS: list[dict[str, str]] = [
+CINEMAS: list[dict[str, object]] = [
     {
         "name": "PVR Icon",
         "address": "Phoenix Palladium, Lower Parel",
         "city_slug": "mumbai",
+        "chain_logo_url": "https://assets.bookmyshow.com/chains/pvr.png",
+        "cancellable": True,
+        "amenities": ["M_TICKET", "FOOD", "PARKING"],
     },
     {
         "name": "INOX Megaplex",
         "address": "R City Mall, Ghatkopar",
         "city_slug": "mumbai",
+        "chain_logo_url": "https://assets.bookmyshow.com/chains/inox.png",
+        "cancellable": False,
+        "amenities": ["M_TICKET", "FOOD"],
     },
     {
         "name": "Maison PVR",
         "address": "Jio World Drive, Bandra Kurla Complex",
         "city_slug": "mumbai",
+        "chain_logo_url": "https://assets.bookmyshow.com/chains/pvr.png",
+        "cancellable": True,
+        "amenities": ["M_TICKET", "FOOD", "PARKING", "WHEELCHAIR"],
     },
     {
         "name": "PVR Pavilion",
         "address": "Pavilion Mall, Senapati Bapat Road",
         "city_slug": "pune",
+        "chain_logo_url": "https://assets.bookmyshow.com/chains/pvr.png",
+        "cancellable": False,
+        "amenities": ["M_TICKET", "FOOD"],
     },
     {
         "name": "INOX Bund Garden",
         "address": "Bund Garden Road, Sangamvadi",
         "city_slug": "pune",
+        "chain_logo_url": "https://assets.bookmyshow.com/chains/inox.png",
+        "cancellable": True,
+        "amenities": ["M_TICKET", "PARKING", "WHEELCHAIR"],
     },
 ]
+
+CITY_TIME_ZONE = ZoneInfo("Asia/Kolkata")
+
+SCREENS_PER_CINEMA: list[str] = ["Screen 1", "Screen 2"]
+
+SHOW_TIMES: tuple[time, ...] = (
+    time(8, 0),
+    time(9, 0),
+    time(13, 0),
+    time(18, 30),
+    time(23, 30),
+)
+
+SHOW_FORMATS: tuple[str, ...] = (
+    "2K LASER DOLBY 7.1",
+    "4K DOLBY ATMOS",
+    "IMAX LASER",
+)
+
+# (seats_sold, capacity) stand-ins until MB-106 ships real seat counts.
+# 84/120 is exactly the 70% fast-filling boundary.
+SHOW_OCCUPANCY: tuple[tuple[int, int], ...] = (
+    (84, 120),
+    (40, 120),
+    (110, 120),
+    (12, 120),
+    (66, 120),
+)
+
+# The last seeded movie only plays in Pune, so the ?city= filter has one
+# single-city movie to assert against.
+PUNE_ONLY_MOVIE_SLUG = "kantara-chapter-1"
 
 FIXED_RELEASE_DATES = (
     "2025-05-16",
@@ -262,6 +310,9 @@ def seed_cinemas(db: Session) -> None:
                 name=cinema["name"],
                 address=cinema["address"],
                 city_id=city_ids[cinema["city_slug"]],
+                chain_logo_url=cinema["chain_logo_url"],
+                cancellable=cinema["cancellable"],
+                amenities=cinema["amenities"],
             )
             for cinema in CINEMAS
         ]
@@ -269,10 +320,81 @@ def seed_cinemas(db: Session) -> None:
     db.commit()
 
 
+def _to_utc(day: date, show_time: time) -> datetime:
+    local = datetime.combine(day, show_time, tzinfo=CITY_TIME_ZONE)
+    return local.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def seed_screens(db: Session) -> None:
+    if db.scalar(select(Screen.id).limit(1)) is not None:
+        return
+
+    db.add_all(
+        [
+            Screen(name=name, cinema_id=cinema.id)
+            for cinema in db.scalars(select(Cinema).order_by(Cinema.id))
+            for name in SCREENS_PER_CINEMA
+        ]
+    )
+    db.commit()
+
+
+def seed_shows(db: Session) -> None:
+    if db.scalar(select(Show.id).limit(1)) is not None:
+        return
+
+    screens = db.scalars(select(Screen).order_by(Screen.id)).all()
+    movies = db.scalars(select(Movie).order_by(Movie.id)).all()
+    if not screens or not movies:
+        return
+
+    pune_cinema_ids = set(
+        db.scalars(
+            select(Cinema.id)
+            .join(City, Cinema.city_id == City.id)
+            .where(City.slug == "pune")
+        )
+    )
+
+    today = date.today()
+    rows: list[Show] = []
+    for screen in screens:
+        for movie in movies:
+            if (
+                movie.slug == PUNE_ONLY_MOVIE_SLUG
+                and screen.cinema_id not in pune_cinema_ids
+            ):
+                continue
+
+            languages = [language.lower() for language in movie.languages]
+            for day_offset in range(7):
+                day = today + timedelta(days=day_offset)
+                for time_index, show_time in enumerate(SHOW_TIMES):
+                    seats_sold, capacity = SHOW_OCCUPANCY[
+                        (movie.id + day_offset + time_index) % len(SHOW_OCCUPANCY)
+                    ]
+                    rows.append(
+                        Show(
+                            screen_id=screen.id,
+                            movie_id=movie.id,
+                            starts_at=_to_utc(day, show_time),
+                            format=SHOW_FORMATS[time_index % len(SHOW_FORMATS)],
+                            language=languages[time_index % len(languages)],
+                            capacity=capacity,
+                            seats_sold=seats_sold,
+                        )
+                    )
+
+    db.add_all(rows)
+    db.commit()
+
+
 def seed_all(db: Session) -> None:
     seed_movies(db)
     seed_cities(db)
     seed_cinemas(db)
+    seed_screens(db)
+    seed_shows(db)
 
 
 def main() -> None:

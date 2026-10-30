@@ -79,3 +79,34 @@ def test_movies_endpoint_is_read_only(client):
     response = client.post("/api/movies", json={"title": "New", "genres": "Drama"})
 
     assert response.status_code == 405
+
+
+def test_city_filter_returns_only_movies_showing_that_city(seeded_shows):
+    mumbai = seeded_shows.get("/api/movies", params={"city": "mumbai"})
+    assert mumbai.status_code == 200
+    mumbai_movies = mumbai.json()
+    assert [movie["id"] for movie in mumbai_movies] == list(range(1, 8))
+    assert "Kantara Chapter 1" not in [movie["title"] for movie in mumbai_movies]
+
+    pune = seeded_shows.get("/api/movies", params={"city": "pune"})
+    assert pune.status_code == 200
+    pune_movies = pune.json()
+    assert len(pune_movies) == 8
+    assert "Kantara Chapter 1" in [movie["title"] for movie in pune_movies]
+
+    without_city = seeded_shows.get("/api/movies")
+    assert without_city.status_code == 200
+    assert len(without_city.json()) == 8
+
+
+def test_unknown_city_returns_empty_list(seeded_shows):
+    response = seeded_shows.get("/api/movies", params={"city": "atlantis"})
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_blank_city_returns_422(seeded_shows):
+    response = seeded_shows.get("/api/movies", params={"city": ""})
+
+    assert response.status_code == 422
