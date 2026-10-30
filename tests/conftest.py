@@ -2,6 +2,8 @@ import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
+from collections.abc import Iterator
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -11,14 +13,16 @@ from seed import seed_movies
 
 
 @pytest.fixture()
-def client():
+def client() -> Iterator[TestClient]:
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         seed_movies(db)
 
-    with TestClient(app) as test_client:
-        yield test_client
+    # A plain TestClient (not used as a context manager) so the lifespan does not
+    # run: the startup seeding would otherwise fill the test database with cities
+    # and cinemas. Tests that need those call the seed functions themselves.
+    yield TestClient(app)
 
     Base.metadata.drop_all(bind=engine)
 

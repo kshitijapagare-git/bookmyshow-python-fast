@@ -2,7 +2,12 @@ def test_city_crud(client):
     created = client.post("/api/cities", json={"name": "Pune", "state": "Maharashtra"})
     assert created.status_code == 201
     city = created.json()
-    assert city == {"id": city["id"], "name": "Pune", "state": "Maharashtra"}
+    assert city == {
+        "id": city["id"],
+        "name": "Pune",
+        "state": "Maharashtra",
+        "slug": "pune",
+    }
 
     fetched = client.get(f"/api/cities/{city['id']}")
     assert fetched.status_code == 200
@@ -17,12 +22,38 @@ def test_city_crud(client):
         json={"name": "Pimpri", "state": "Maharashtra"},
     )
     assert updated.status_code == 200
-    assert updated.json() == {"id": city["id"], "name": "Pimpri", "state": "Maharashtra"}
+    assert updated.json() == {
+        "id": city["id"],
+        "name": "Pimpri",
+        "state": "Maharashtra",
+        "slug": "pimpri",
+    }
 
     deleted = client.delete(f"/api/cities/{city['id']}")
     assert deleted.status_code == 204
 
     assert client.get(f"/api/cities/{city['id']}").status_code == 404
+
+
+def test_city_slug_generation(client):
+    created = client.post(
+        "/api/cities",
+        json={"name": "Navi Mumbai", "state": "Maharashtra", "slug": "not-this"},
+    )
+
+    assert created.status_code == 201
+    assert created.json()["slug"] == "navi-mumbai"
+    assert created.json()["name"] == "Navi Mumbai"
+
+
+def test_duplicate_city_slug_returns_409(client):
+    first = client.post("/api/cities", json={"name": "Pune", "state": "Maharashtra"})
+    assert first.status_code == 201
+
+    second = client.post("/api/cities", json={"name": "Pune", "state": "Maharashtra"})
+
+    assert second.status_code == 409
+    assert second.json()["detail"] == "City slug already exists"
 
 
 def test_city_validation(client):
