@@ -1,13 +1,16 @@
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     UniqueConstraint,
 )
@@ -79,6 +82,28 @@ class Screen(Base):
     shows: Mapped[list["Show"]] = relationship(
         back_populates="screen", cascade="all, delete-orphan"
     )
+    seat_categories: Mapped[list["SeatCategory"]] = relationship(
+        back_populates="screen", cascade="all, delete-orphan"
+    )
+
+
+class SeatCategory(Base):
+    __tablename__ = "seat_categories"
+    __table_args__ = (
+        UniqueConstraint("screen_id", "name", name="uq_seat_categories_screen_name"),
+        CheckConstraint(
+            "name IN ('NORMAL','EXECUTIVE','PREMIUM','PREMIUM_XL','PREMIUM_PLUS')",
+            name="ck_seat_categories_name",
+        ),
+        CheckConstraint("price >= 1 AND price <= 10000", name="ck_seat_categories_price"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    screen_id: Mapped[int] = mapped_column(ForeignKey("screens.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+
+    screen: Mapped[Screen] = relationship(back_populates="seat_categories")
 
 
 class Show(Base):

@@ -29,7 +29,7 @@ def test_shows_grouped_by_cinema_sorted_by_start_time(client):
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"movie", "dates", "cinemas"}
+    assert set(body) == {"movie", "dates", "cinemas", "appliedFilters", "availableFilters"}
     assert set(body["movie"]) == MOVIE_KEYS
     assert body["movie"] == {
         "id": 1,
@@ -50,7 +50,7 @@ def test_shows_grouped_by_cinema_sorted_by_start_time(client):
 
     cinemas = body["cinemas"]
     assert len(cinemas) == 3
-    assert [cinema["id"] for cinema in cinemas] == sorted(cinema["id"] for cinema in cinemas)
+    assert [cinema["name"] for cinema in cinemas] == sorted(cinema["name"] for cinema in cinemas)
 
     for cinema in cinemas:
         assert set(cinema) == CINEMA_KEYS
