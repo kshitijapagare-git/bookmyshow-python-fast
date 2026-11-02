@@ -5,6 +5,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .seating import SeatsUnavailableError
+
 
 def _problem_detail_response(request: Request, status_code: int, detail: str) -> JSONResponse:
     try:
@@ -39,6 +41,25 @@ async def validation_exception_handler(
     return _problem_detail_response(request, 422, detail or "Invalid request")
 
 
+async def seats_unavailable_exception_handler(
+    request: Request, exc: SeatsUnavailableError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "type": "about:blank",
+            "title": "Conflict",
+            "status": 409,
+            "detail": exc.detail,
+            "seatIds": exc.seat_ids,
+            "instance": request.url.path,
+        },
+    )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, problem_details_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(
+        SeatsUnavailableError, seats_unavailable_exception_handler
+    )
