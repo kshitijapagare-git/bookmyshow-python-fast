@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from .db import Base, SessionLocal, engine
 from .errors import register_error_handlers
-from .routers import cities, cinemas, movies, shows
+from .routers import auth, cities, cinemas, movies, shows
 from seed import seed_data
 
 
@@ -28,5 +28,7 @@ app.include_router(cities.router)
 app.include_router(cinemas.router)
 app.include_router(movies.router)
 app.include_router(shows.router)
+app.include_router(auth.router)
+app.include_router(auth.me_router)
 
 init_db()

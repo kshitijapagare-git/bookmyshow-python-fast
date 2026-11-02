@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import (
@@ -120,3 +120,46 @@ class Show(Base):
 
     screen: Mapped[Screen] = relationship(back_populates="shows")
     movie: Mapped[Movie] = relationship()
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("name IS NULL OR length(name) <= 80", name="ck_users_name_length"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    phone: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    name: Mapped[str | None] = mapped_column(String(80), nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class OtpChallenge(Base):
+    __tablename__ = "otp_challenges"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    phone: Mapped[str] = mapped_column(String, nullable=False)
+    code_hash: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class OtpRequest(Base):
+    __tablename__ = "otp_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    phone: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
