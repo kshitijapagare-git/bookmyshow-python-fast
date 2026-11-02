@@ -1,4 +1,6 @@
-from typing import Annotated
+from datetime import date
+from enum import Enum
+from typing import Annotated, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints
 
@@ -20,6 +22,7 @@ class CityUpdate(CityBase):
 
 class CityOut(CityBase):
     id: int
+    slug: str
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -48,12 +51,41 @@ class CinemaOut(BaseModel):
     cityId: int
 
 
-class MovieOut(BaseModel):
+class Certificate(str, Enum):
+    U = "U"
+    UA = "UA"
+    A = "A"
+    S = "S"
+
+
+class MovieSummaryOut(BaseModel):
     id: int
     title: str
+    slug: str
     genres: str
     posterUrl: str | None = None
-    rating: float | None = None
+    rating: float | None = Field(default=None, ge=0.0, le=10.0)
     votes: int | None = None
     likes: int | None = None
     promoted: bool = False
+
+
+class MovieOut(BaseModel):
+    id: int
+    title: str
+    slug: str
+    genres: str
+    posterUrl: str | None = None
+    rating: float | None = Field(default=None, ge=0.0, le=10.0)
+    votes: int | None = None
+    likes: int | None = None
+    promoted: bool = False
+    synopsis: str = Field(max_length=1000)
+    languages: list[str] = Field(min_length=1)
+    formats: list[Literal["2D", "3D", "IMAX", "4DX"]]
+    durationMinutes: int = Field(ge=30, le=300)
+    certificate: Certificate
+    releaseDate: date
+    backdropUrl: str
+    trailerUrl: str | None = None
+    interestedCount: int = 0

@@ -3,14 +3,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .db import Base, SessionLocal, engine
+from .errors import register_error_handlers
 from .routers import cities, cinemas, movies
-from seed import seed_movies
+from seed import seed_data
 
 
 def init_db() -> None:
+    Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
-        seed_movies(db)
+        seed_data(db)
 
 
 @asynccontextmanager
@@ -20,6 +22,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="BookMyShow API", version="0.1.0", lifespan=lifespan)
+register_error_handlers(app)
 
 app.include_router(cities.router)
 app.include_router(cinemas.router)

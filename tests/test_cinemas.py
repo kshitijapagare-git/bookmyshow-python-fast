@@ -18,7 +18,7 @@ def test_cinema_crud(client, city):
 
     listed = client.get("/api/cinemas")
     assert listed.status_code == 200
-    assert listed.json() == [cinema]
+    assert cinema in listed.json()
 
     updated = client.put(
         f"/api/cinemas/{cinema['id']}",

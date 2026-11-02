@@ -1,8 +1,8 @@
 def test_city_crud(client):
-    created = client.post("/api/cities", json={"name": "Pune", "state": "Maharashtra"})
+    created = client.post("/api/cities", json={"name": "Nagpur", "state": "Maharashtra"})
     assert created.status_code == 201
     city = created.json()
-    assert city == {"id": city["id"], "name": "Pune", "state": "Maharashtra"}
+    assert city == {"id": city["id"], "name": "Nagpur", "state": "Maharashtra", "slug": "nagpur"}
 
     fetched = client.get(f"/api/cities/{city['id']}")
     assert fetched.status_code == 200
@@ -10,14 +10,19 @@ def test_city_crud(client):
 
     listed = client.get("/api/cities")
     assert listed.status_code == 200
-    assert listed.json() == [city]
+    assert city in listed.json()
 
     updated = client.put(
         f"/api/cities/{city['id']}",
         json={"name": "Pimpri", "state": "Maharashtra"},
     )
     assert updated.status_code == 200
-    assert updated.json() == {"id": city["id"], "name": "Pimpri", "state": "Maharashtra"}
+    assert updated.json() == {
+        "id": city["id"],
+        "name": "Pimpri",
+        "state": "Maharashtra",
+        "slug": "pimpri",
+    }
 
     deleted = client.delete(f"/api/cities/{city['id']}")
     assert deleted.status_code == 204
