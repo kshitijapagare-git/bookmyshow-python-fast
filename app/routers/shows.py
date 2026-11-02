@@ -2,11 +2,11 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Cinema, City, Movie, Screen, SeatCategory, Show
+from ..models import Cinema, City, Movie, Screen, SeatCategory, Show, ShowSeat
 from ..schemas import (
     AppliedFiltersOut,
     Availability,
@@ -17,6 +17,7 @@ from ..schemas import (
     ShowDateOut,
     ShowMovieOut,
     ShowOut,
+    ShowSeatStatus,
     ShowSort,
     TimeOfDay,
 )
@@ -25,7 +26,7 @@ from ..timeutil import ist_local, today_ist, utc_from_ist
 router = APIRouter(prefix="/api/movies", tags=["shows"])
 
 SHOW_WINDOW_DAYS = 7
-FAST_FILLING_THRESHOLD = 0.7
+FAST_FILLING_THRESHOLD = 0.5
 LATE_NIGHT_CUTOFF = (23, 0)
 EARLY_MORNING_CUTOFF = (9, 0)
 SHOW_DATE_DETAIL = "date must be today or within the next 6 days"
@@ -125,13 +126,32 @@ def _time_bucket(local: datetime) -> TimeOfDay:
     return TimeOfDay.NIGHT
 
 
-def _availability(show: Show) -> Availability:
-    if show.capacity and show.seats_sold / show.capacity >= FAST_FILLING_THRESHOLD:
+def _show_seat_counts(db: Session, show_ids: list[int]) -> dict[int, tuple[int, int]]:
+    """Return (held-or-sold, total) ShowSeat counts per show id."""
+    counts: dict[int, tuple[int, int]] = {show_id: (0, 0) for show_id in show_ids}
+    if not show_ids:
+        return counts
+
+    rows = db.execute(
+        select(ShowSeat.show_id, ShowSeat.status, func.count(ShowSeat.id))
+        .where(ShowSeat.show_id.in_(show_ids))
+        .group_by(ShowSeat.show_id, ShowSeat.status)
+    )
+    for show_id, seat_status, count in rows.all():
+        held_or_sold, total = counts[show_id]
+        if seat_status != ShowSeatStatus.AVAILABLE.value:
+            held_or_sold += count
+        counts[show_id] = (held_or_sold, total + count)
+    return counts
+
+
+def _availability(held_or_sold: int, total: int) -> Availability:
+    if total > 0 and held_or_sold / total >= FAST_FILLING_THRESHOLD:
         return Availability.FAST_FILLING
     return Availability.AVAILABLE
 
 
-def _to_show_out(show: Show) -> ShowOut:
+def _to_show_out(show: Show, held_or_sold: int, total: int) -> ShowOut:
     local = ist_local(show.starts_at)
     clock = (local.hour, local.minute)
     return ShowOut(
@@ -139,7 +159,7 @@ def _to_show_out(show: Show) -> ShowOut:
         startsAt=local,
         format=show.format,
         language=show.language,
-        availability=_availability(show),
+        availability=_availability(held_or_sold, total),
         lateNight=clock > LATE_NIGHT_CUTOFF,
         earlyMorning=clock < EARLY_MORNING_CUTOFF,
     )
@@ -306,6 +326,7 @@ def list_shows(
         shows_by_cinema.setdefault(cinema_id, []).append(show)
 
     day_shows = [show for shows in shows_by_cinema.values() for show in shows]
+    seat_counts = _show_seat_counts(db, [show.id for show in day_shows])
     seat_prices = _screen_seat_prices(db, list({show.screen_id for show in day_shows}))
     available_filters = AvailableFiltersOut(
         priceBands=_price_bands(
@@ -320,7 +341,7 @@ def list_shows(
             select(Cinema).where(Cinema.id.in_(list(shows_by_cinema))).order_by(Cinema.id)
         ):
             matching_shows = [
-                _to_show_out(show)
+                _to_show_out(show, *seat_counts.get(show.id, (0, 0)))
                 for show in shows_by_cinema[cinema.id]
                 if _show_matches(show, cinema, seat_prices.get(show.screen_id, []), filters)
             ]

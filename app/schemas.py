@@ -96,6 +96,17 @@ class Availability(str, Enum):
     FAST_FILLING = "FAST_FILLING"
 
 
+class SeatKind(str, Enum):
+    STANDARD = "STANDARD"
+    WHEELCHAIR = "WHEELCHAIR"
+
+
+class ShowSeatStatus(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    HELD = "HELD"
+    SOLD = "SOLD"
+
+
 class Amenity(str, Enum):
     M_TICKET = "M_TICKET"
     FOOD = "FOOD"
@@ -184,6 +195,47 @@ class MovieShowsOut(BaseModel):
     availableFilters: AvailableFiltersOut
 
 
+class SeatOut(BaseModel):
+    id: int
+    number: int
+    kind: SeatKind
+    gapBefore: bool
+    bestseller: bool
+    status: ShowSeatStatus
+    heldByMe: bool = False
+
+
+class SeatRowOut(BaseModel):
+    row: str
+    seats: list[SeatOut]
+
+
+class SeatCategoryLayoutOut(BaseModel):
+    id: int
+    name: SeatCategoryName
+    label: str
+    price: float
+    availability: Availability
+    rows: list[SeatRowOut]
+
+
+class SeatLayoutShowOut(BaseModel):
+    id: int
+    startsAt: datetime
+    format: str
+    movieId: int
+    movieTitle: str
+    language: str
+    cinemaId: int
+    cinemaName: str
+
+
+class SeatLayoutOut(BaseModel):
+    show: SeatLayoutShowOut
+    maxSeatsPerBooking: int = 10
+    categories: list[SeatCategoryLayoutOut]
+
+
 class OtpRequestIn(BaseModel):
     countryCode: str
     phone: Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\d{10}$")]
@@ -210,3 +262,19 @@ class OtpVerifyOut(BaseModel):
     token: str
     expiresInSeconds: int = 604800
     user: UserOut
+
+
+class SeatHoldIn(BaseModel):
+    seatIds: list[int]
+
+
+class HeldSeatOut(BaseModel):
+    id: int
+    label: str
+
+
+class SeatHoldOut(BaseModel):
+    holdId: str
+    heldUntil: datetime
+    seats: list[HeldSeatOut]
+    total: float

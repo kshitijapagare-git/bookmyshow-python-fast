@@ -74,3 +74,24 @@ def get_current_user(
     if user is None:
         raise _unauthorized()
     return user
+
+
+def get_optional_user(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """Resolve the bearer token when it is valid, otherwise treat the caller as a guest."""
+    if authorization is None or not authorization.strip():
+        return None
+
+    scheme, _, raw_token = authorization.partition(" ")
+    token = raw_token.strip()
+    if scheme.lower() != "bearer" or not token:
+        return None
+
+    try:
+        user_id = decode_token(token=token)
+    except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+        return None
+
+    return db.get(User, user_id)

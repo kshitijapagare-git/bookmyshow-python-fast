@@ -1,9 +1,10 @@
+from collections import defaultdict
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db import SessionLocal
-from app.models import Show
+from app.models import ShowSeat
 from app.timeutil import today_ist
 
 MOVIE_KEYS = {"id", "title", "durationMinutes", "certificate", "genres"}
@@ -91,22 +92,37 @@ def test_shows_availability_rule(client):
     shows = [show for cinema in response.json()["cinemas"] for show in cinema["shows"]]
     assert shows
 
-    with SessionLocal() as db:
-        seeded = {show.id: show for show in db.scalars(select(Show))}
+    ratios = _seat_fill_ratios()
 
-    fill_ratio = {}
     for show in shows:
-        row = seeded[show["id"]]
-        ratio = row.seats_sold / row.capacity
-        fill_ratio[show["id"]] = ratio
-        expected = "FAST_FILLING" if ratio >= 0.7 else "AVAILABLE"
-        assert show["availability"] == expected
+        ratio = ratios[show["id"]]
+        expected = "FAST_FILLING" if ratio >= 0.5 else "AVAILABLE"
+        assert show["availability"] == expected, show["id"]
 
-    fast = [show for show in shows if fill_ratio[show["id"]] == 0.7]
-    available = [show for show in shows if fill_ratio[show["id"]] < 0.7]
-    assert fast and available
-    assert all(show["availability"] == "FAST_FILLING" for show in fast)
-    assert all(show["availability"] == "AVAILABLE" for show in available)
+    at_threshold = [show for show in shows if ratios[show["id"]] == 0.5]
+    above = [show for show in shows if ratios[show["id"]] > 0.5]
+    below = [show for show in shows if ratios[show["id"]] < 0.5]
+    assert at_threshold and above and below
+    assert all(show["availability"] == "FAST_FILLING" for show in at_threshold + above)
+    assert all(show["availability"] == "AVAILABLE" for show in below)
+
+
+def _seat_fill_ratios() -> dict[int, float]:
+    """Share of each show's seats that are HELD or SOLD."""
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(ShowSeat.show_id, ShowSeat.status, func.count(ShowSeat.id)).group_by(
+                ShowSeat.show_id, ShowSeat.status
+            )
+        )
+        totals: dict[int, int] = defaultdict(int)
+        filled: dict[int, int] = defaultdict(int)
+        for show_id, seat_status, count in rows.all():
+            totals[show_id] += count
+            if seat_status != "AVAILABLE":
+                filled[show_id] += count
+
+    return {show_id: filled[show_id] / total for show_id, total in totals.items()}
 
 
 def test_shows_date_validation_returns_400(client):

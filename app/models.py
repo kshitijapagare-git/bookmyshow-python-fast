@@ -85,6 +85,9 @@ class Screen(Base):
     seat_categories: Mapped[list["SeatCategory"]] = relationship(
         back_populates="screen", cascade="all, delete-orphan"
     )
+    seats: Mapped[list["Seat"]] = relationship(
+        back_populates="screen", cascade="all, delete-orphan"
+    )
 
 
 class SeatCategory(Base):
@@ -106,6 +109,31 @@ class SeatCategory(Base):
     screen: Mapped[Screen] = relationship(back_populates="seat_categories")
 
 
+class Seat(Base):
+    __tablename__ = "seats"
+    __table_args__ = (
+        UniqueConstraint("screen_id", "row", "number", name="uq_seats_screen_row_number"),
+        CheckConstraint(
+            "length(row) = 1 AND row >= 'A' AND row <= 'Z'", name="ck_seats_row"
+        ),
+        CheckConstraint("number >= 1 AND number <= 50", name="ck_seats_number"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    screen_id: Mapped[int] = mapped_column(ForeignKey("screens.id"), nullable=False)
+    category_id: Mapped[int] = mapped_column(
+        ForeignKey("seat_categories.id"), nullable=False
+    )
+    row: Mapped[str] = mapped_column(String(1), nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False, default="STANDARD")
+    gap_before: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    bestseller: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    category: Mapped[SeatCategory] = relationship()
+    screen: Mapped[Screen] = relationship(back_populates="seats")
+
+
 class Show(Base):
     __tablename__ = "shows"
 
@@ -115,11 +143,34 @@ class Show(Base):
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     format: Mapped[str] = mapped_column(String, nullable=False)
     language: Mapped[str] = mapped_column(String, nullable=False)
-    capacity: Mapped[int] = mapped_column(Integer, nullable=False)
-    seats_sold: Mapped[int] = mapped_column(Integer, nullable=False)
 
     screen: Mapped[Screen] = relationship(back_populates="shows")
     movie: Mapped[Movie] = relationship()
+    show_seats: Mapped[list["ShowSeat"]] = relationship(
+        back_populates="show", cascade="all, delete-orphan"
+    )
+
+
+class ShowSeat(Base):
+    __tablename__ = "show_seats"
+    __table_args__ = (
+        UniqueConstraint("show_id", "seat_id", name="uq_show_seats_show_seat"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    show_id: Mapped[int] = mapped_column(ForeignKey("shows.id"), nullable=False)
+    seat_id: Mapped[int] = mapped_column(ForeignKey("seats.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="AVAILABLE")
+    held_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    held_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    hold_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    show: Mapped[Show] = relationship(back_populates="show_seats")
+
+    __mapper_args__ = {"version_id_col": version}
 
 
 class User(Base):

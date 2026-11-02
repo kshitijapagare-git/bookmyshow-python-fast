@@ -2,11 +2,12 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from app.db import Base, SessionLocal, engine
-from app.models import Cinema, City, Movie, Screen, SeatCategory, Show
+from app.models import Cinema, City, Movie, Screen, Seat, SeatCategory, Show, ShowSeat
+from app.schemas import ShowSeatStatus
 from app.timeutil import utc_from_ist
 
 CITIES: list[dict[str, str]] = [
@@ -63,9 +64,6 @@ SCREEN_NAMES: list[str] = ["Screen 1", "Screen 2"]
 SHOW_DAYS = 7
 SHOW_START_TIMES: list[tuple[int, int]] = [(8, 15), (9, 0), (13, 0), (18, 30), (23, 15)]
 SHOW_FORMATS: list[str] = ["2K LASER DOLBY 7.1", "2K DOLBY 7.1", "IMAX 3D"]
-SHOW_CAPACITY = 100
-SEATS_SOLD_FAST_FILLING = 70
-SEATS_SOLD_AVAILABLE = 69
 
 SEAT_CATEGORY_PRICES: dict[str, Decimal] = {
     "NORMAL": Decimal("180.00"),
@@ -74,6 +72,47 @@ SEAT_CATEGORY_PRICES: dict[str, Decimal] = {
     "PREMIUM_XL": Decimal("250.00"),
     "PREMIUM_PLUS": Decimal("230.00"),
 }
+
+FULL_LAYOUT_ROWS: list[str] = [
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+]
+SMALL_LAYOUT_ROWS: list[str] = ["A", "B", "C", "D", "E"]
+
+SEAT_CATEGORY_ROW_BANDS: dict[str, list[str]] = {
+    "NORMAL": ["D", "E", "F"],
+    "EXECUTIVE": ["G", "H", "I"],
+    "PREMIUM": ["J", "K", "L"],
+    "PREMIUM_XL": ["M", "N"],
+    "PREMIUM_PLUS": ["O", "P", "Q"],
+}
+SMALL_LAYOUT_CATEGORY_BY_ROW: dict[str, str] = {
+    "A": "NORMAL",
+    "B": "EXECUTIVE",
+    "C": "PREMIUM",
+    "D": "PREMIUM_XL",
+    "E": "PREMIUM_PLUS",
+}
+
+FULL_LAYOUT_SEATS_PER_ROW = 13
+SMALL_LAYOUT_SEATS_PER_ROW = 10
+FULL_LAYOUT_SEAT_GAPS = {4, 10}
+SMALL_LAYOUT_SEAT_GAPS = {4}
+BESTSELLER_SEATS: set[tuple[str, int]] = {("M", 6), ("M", 7), ("K", 5), ("K", 6)}
+WHEELCHAIR_SEAT: tuple[str, int] = ("Q", 1)
+SOLD_FRACTIONS: list[float] = [0.5, 0.6, 0.1, 0.0]
 
 MOVIES: list[dict[str, Any]] = [
     {
@@ -320,6 +359,126 @@ def seed_seat_categories(db: Session) -> None:
     db.commit()
 
 
+def _screen_categories(db: Session) -> dict[int, dict[str, SeatCategory]]:
+    categories: dict[int, dict[str, SeatCategory]] = {}
+    for category in db.scalars(select(SeatCategory).order_by(SeatCategory.id)):
+        categories.setdefault(category.screen_id, {})[category.name] = category
+    return categories
+
+
+def _full_row_category(
+    categories: dict[str, SeatCategory], row: str
+) -> SeatCategory | None:
+    for name, rows in SEAT_CATEGORY_ROW_BANDS.items():
+        if row in rows:
+            return categories.get(name)
+    return None
+
+
+def _full_screen_seats(
+    screen_id: int, categories: dict[str, SeatCategory]
+) -> list[Seat]:
+    seats: list[Seat] = []
+    for row in FULL_LAYOUT_ROWS:
+        category = _full_row_category(categories, row)
+        if category is None:
+            continue
+        for number in range(1, FULL_LAYOUT_SEATS_PER_ROW + 1):
+            seats.append(
+                Seat(
+                    screen_id=screen_id,
+                    category_id=category.id,
+                    row=row,
+                    number=number,
+                    kind="WHEELCHAIR" if (row, number) == WHEELCHAIR_SEAT else "STANDARD",
+                    gap_before=number in FULL_LAYOUT_SEAT_GAPS,
+                    bestseller=(row, number) in BESTSELLER_SEATS,
+                )
+            )
+    return seats
+
+
+def _small_screen_seats(
+    screen_id: int, categories: dict[str, SeatCategory]
+) -> list[Seat]:
+    seats: list[Seat] = []
+    for row in SMALL_LAYOUT_ROWS:
+        category = categories.get(SMALL_LAYOUT_CATEGORY_BY_ROW[row])
+        if category is None:
+            continue
+        for number in range(1, SMALL_LAYOUT_SEATS_PER_ROW + 1):
+            seats.append(
+                Seat(
+                    screen_id=screen_id,
+                    category_id=category.id,
+                    row=row,
+                    number=number,
+                    kind="STANDARD",
+                    gap_before=number in SMALL_LAYOUT_SEAT_GAPS,
+                    bestseller=False,
+                )
+            )
+    return seats
+
+
+def seed_seats(db: Session) -> None:
+    if db.scalar(select(Seat.id).limit(1)) is not None:
+        return
+
+    categories_by_screen = _screen_categories(db)
+    screens = list(db.scalars(select(Screen).order_by(Screen.id)))
+    full_screen_id = screens[0].id if screens else None
+
+    seats: list[Seat] = []
+    for screen in screens:
+        categories = categories_by_screen.get(screen.id, {})
+        if not categories:
+            continue
+        if screen.id == full_screen_id:
+            seats.extend(_full_screen_seats(screen.id, categories))
+        else:
+            seats.extend(_small_screen_seats(screen.id, categories))
+
+    db.add_all(seats)
+    db.commit()
+
+
+def seed_show_seats(db: Session) -> None:
+    if db.scalar(select(ShowSeat.id).limit(1)) is not None:
+        return
+
+    seats_by_screen: dict[int, list[Seat]] = {}
+    for seat in db.scalars(select(Seat).order_by(Seat.id)):
+        seats_by_screen.setdefault(seat.screen_id, []).append(seat)
+
+    rows: list[dict[str, Any]] = []
+    for index, show in enumerate(db.scalars(select(Show).order_by(Show.id))):
+        screen_seats = seats_by_screen.get(show.screen_id, [])
+        if not screen_seats:
+            continue
+        fraction = SOLD_FRACTIONS[index % len(SOLD_FRACTIONS)]
+        sold_count = int(len(screen_seats) * fraction)
+        for position, seat in enumerate(screen_seats):
+            rows.append(
+                {
+                    "show_id": show.id,
+                    "seat_id": seat.id,
+                    "status": (
+                        ShowSeatStatus.SOLD.value
+                        if position < sold_count
+                        else ShowSeatStatus.AVAILABLE.value
+                    ),
+                    "held_by": None,
+                    "held_until": None,
+                    "hold_id": None,
+                    "version": 1,
+                }
+            )
+
+    db.execute(insert(ShowSeat), rows)
+    db.commit()
+
+
 def seed_shows(db: Session) -> None:
     if db.scalar(select(Show.id).limit(1)) is not None:
         return
@@ -341,7 +500,6 @@ def seed_shows(db: Session) -> None:
             for index, movie in enumerate(cinema_movies):
                 language = movie.languages[offset % len(movie.languages)].lower()
                 for slot, (hour, minute) in enumerate(SHOW_START_TIMES):
-                    fast_filling = (index + offset + slot) % 2 == 0
                     shows.append(
                         Show(
                             screen_id=cinema_screens[slot % len(cinema_screens)].id,
@@ -349,12 +507,6 @@ def seed_shows(db: Session) -> None:
                             starts_at=utc_from_ist(day, hour, minute),
                             format=SHOW_FORMATS[(index + slot) % len(SHOW_FORMATS)],
                             language=language,
-                            capacity=SHOW_CAPACITY,
-                            seats_sold=(
-                                SEATS_SOLD_FAST_FILLING
-                                if fast_filling
-                                else SEATS_SOLD_AVAILABLE
-                            ),
                         )
                     )
 
@@ -369,6 +521,8 @@ def seed_data(db: Session) -> None:
     seed_screens(db)
     seed_seat_categories(db)
     seed_shows(db)
+    seed_seats(db)
+    seed_show_seats(db)
 
 
 def main() -> None:

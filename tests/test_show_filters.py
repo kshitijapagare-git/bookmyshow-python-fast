@@ -51,8 +51,6 @@ def _add_screen_with_show(
             starts_at=utc_from_ist(today_ist(), hour, minute),
             format="2K DOLBY 7.1",
             language="hindi",
-            capacity=100,
-            seats_sold=10,
         )
         db.add(show)
         db.commit()

@@ -1,9 +1,9 @@
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db import SessionLocal
-from app.models import Cinema, Movie, Screen, Show
+from app.models import Cinema, Movie, Screen, Show, ShowSeat
 from app.timeutil import ist_local, utc_from_ist
 
 SEEDED_CITIES = {
@@ -126,9 +126,10 @@ def test_seeded_shows_cover_the_next_seven_days(client):
 
     assert {(cinema.id, day) for cinema in cinemas for day in days} <= covered
 
-    fill_ratios = [show.seats_sold / show.capacity for show in shows]
-    assert any(ratio >= 0.7 for ratio in fill_ratios)
-    assert any(ratio < 0.7 for ratio in fill_ratios)
+    fill_ratios = _show_fill_ratios()
+    assert {show.id for show in shows} == set(fill_ratios)
+    assert any(ratio >= 0.5 for ratio in fill_ratios.values())
+    assert any(ratio < 0.5 for ratio in fill_ratios.values())
 
 
 def test_seeded_cinema_chain_fields(client):
@@ -143,3 +144,23 @@ def test_seeded_cinema_chain_fields(client):
         assert set(cinema.amenities) <= SEEDED_AMENITIES
 
     assert {cinema.cancellable for cinema in cinemas} == {True, False}
+
+
+def _show_fill_ratios() -> dict[int, float]:
+    """Share of each show's seats that are not AVAILABLE."""
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(ShowSeat.show_id, ShowSeat.status, func.count(ShowSeat.id)).group_by(
+                ShowSeat.show_id, ShowSeat.status
+            )
+        )
+        totals: dict[int, int] = {}
+        filled: dict[int, int] = {}
+        for show_id, seat_status, count in rows.all():
+            totals[show_id] = totals.get(show_id, 0) + count
+            if seat_status != "AVAILABLE":
+                filled[show_id] = filled.get(show_id, 0) + count
+
+    return {
+        show_id: filled.get(show_id, 0) / total for show_id, total in totals.items()
+    }
