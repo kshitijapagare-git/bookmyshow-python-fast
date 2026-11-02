@@ -9,6 +9,7 @@ def test_lists_the_eight_seeded_movies(client):
     assert movies[0]["posterUrl"] == "https://picsum.photos/seed/pehla-pyaar/400/600"
     assert movies[2]["rating"] == 9.5
     assert movies[2]["votes"] == 46000
+    assert all(movie["slug"] for movie in movies)
 
 
 def test_movies_endpoint_is_read_only(client):

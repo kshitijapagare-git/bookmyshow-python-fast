@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.db import Base, SessionLocal, engine
 from app.main import app
-from seed import seed_movies
+from seed import seed_data
 
 
 @pytest.fixture()
@@ -15,7 +15,7 @@ def client():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
-        seed_movies(db)
+        seed_data(db)
 
     with TestClient(app) as test_client:
         yield test_client
@@ -25,6 +25,6 @@ def client():
 
 @pytest.fixture()
 def city(client):
-    response = client.post("/api/cities", json={"name": "Pune", "state": "Maharashtra"})
+    response = client.post("/api/cities", json={"name": "Nagpur", "state": "Maharashtra"})
     assert response.status_code == 201
     return response.json()
