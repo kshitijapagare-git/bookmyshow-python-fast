@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Annotated, Literal
 
@@ -89,3 +89,54 @@ class MovieOut(BaseModel):
     backdropUrl: str
     trailerUrl: str | None = None
     interestedCount: int = 0
+
+
+class Availability(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    FAST_FILLING = "FAST_FILLING"
+
+
+class Amenity(str, Enum):
+    M_TICKET = "M_TICKET"
+    FOOD = "FOOD"
+    PARKING = "PARKING"
+    WHEELCHAIR = "WHEELCHAIR"
+
+
+class ShowOut(BaseModel):
+    id: int
+    startsAt: datetime
+    format: str
+    language: str
+    availability: Availability
+    lateNight: bool
+    earlyMorning: bool
+
+
+class ShowCinemaOut(BaseModel):
+    id: int
+    name: str
+    address: str
+    chainLogoUrl: str | None = None
+    cancellable: bool = False
+    amenities: list[Amenity]
+    shows: list[ShowOut]
+
+
+class ShowDateOut(BaseModel):
+    date: date
+    hasShows: bool
+
+
+class ShowMovieOut(BaseModel):
+    id: int
+    title: str
+    durationMinutes: int
+    certificate: Certificate
+    genres: str
+
+
+class MovieShowsOut(BaseModel):
+    movie: ShowMovieOut
+    dates: list[ShowDateOut]
+    cinemas: list[ShowCinemaOut]
