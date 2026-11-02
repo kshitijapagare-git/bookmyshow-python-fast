@@ -1,4 +1,10 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+
+from sqlalchemy import select
+
+from app.db import SessionLocal
+from app.models import Cinema, Movie, Screen, Show
+from app.timeutil import ist_local, utc_from_ist
 
 SEEDED_CITIES = {
     "Mumbai": "mumbai",
@@ -66,3 +72,74 @@ def test_seeded_movie_detail_fields(client):
     assert pehla_pyaar["title"] == "Pehla Pyaar Doosri Baar"
     detail = client.get(f"/api/movies/{pehla_pyaar['id']}").json()
     assert detail["releaseDate"] == (date.today() + timedelta(days=1)).isoformat()
+
+
+SEEDED_SHOW_START_TIMES = {(8, 15), (9, 0), (13, 0), (18, 30), (23, 15)}
+SEEDED_AMENITIES = {"M_TICKET", "FOOD", "PARKING", "WHEELCHAIR"}
+
+
+def _as_utc(moment: datetime) -> datetime:
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def test_seeded_screens_per_cinema(client):
+    with SessionLocal() as db:
+        cinemas = list(db.scalars(select(Cinema).order_by(Cinema.id)))
+        screens = list(db.scalars(select(Screen).order_by(Screen.id)))
+
+    assert len(cinemas) == 5
+    assert len(screens) == 10
+
+    screens_per_cinema = {cinema.id: 0 for cinema in cinemas}
+    for screen in screens:
+        screens_per_cinema[screen.cinema_id] += 1
+
+    assert set(screens_per_cinema.values()) == {2}
+
+
+def test_seeded_shows_cover_the_next_seven_days(client):
+    with SessionLocal() as db:
+        cinemas = list(db.scalars(select(Cinema).order_by(Cinema.id)))
+        screens = list(db.scalars(select(Screen)))
+        shows = list(db.scalars(select(Show)))
+        movie_languages = {
+            movie.id: {language.lower() for language in movie.languages}
+            for movie in db.scalars(select(Movie))
+        }
+
+    assert shows
+
+    days = [date.today() + timedelta(days=offset) for offset in range(7)]
+    cinema_by_screen = {screen.id: screen.cinema_id for screen in screens}
+
+    covered = set()
+    for show in shows:
+        local = ist_local(show.starts_at)
+        expected = utc_from_ist(local.date(), local.hour, local.minute)
+        assert (local.hour, local.minute) in SEEDED_SHOW_START_TIMES
+        assert _as_utc(show.starts_at) == expected
+        assert show.language == show.language.lower()
+        assert show.language in movie_languages[show.movie_id]
+        covered.add((cinema_by_screen[show.screen_id], local.date()))
+
+    assert {(cinema.id, day) for cinema in cinemas for day in days} <= covered
+
+    fill_ratios = [show.seats_sold / show.capacity for show in shows]
+    assert any(ratio >= 0.7 for ratio in fill_ratios)
+    assert any(ratio < 0.7 for ratio in fill_ratios)
+
+
+def test_seeded_cinema_chain_fields(client):
+    with SessionLocal() as db:
+        cinemas = list(db.scalars(select(Cinema).order_by(Cinema.id)))
+
+    assert len(cinemas) == 5
+    for cinema in cinemas:
+        assert cinema.chain_logo_url
+        assert isinstance(cinema.cancellable, bool)
+        assert cinema.amenities
+        assert set(cinema.amenities) <= SEEDED_AMENITIES
+
+    assert {cinema.cancellable for cinema in cinemas} == {True, False}
