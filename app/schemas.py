@@ -182,3 +182,31 @@ class MovieShowsOut(BaseModel):
     cinemas: list[ShowCinemaOut]
     appliedFilters: AppliedFiltersOut
     availableFilters: AvailableFiltersOut
+
+
+class OtpRequestIn(BaseModel):
+    countryCode: str
+    phone: Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\d{10}$")]
+
+
+class OtpRequestOut(BaseModel):
+    challengeId: str
+    resendAfterSeconds: int = 30
+    expiresInSeconds: int = 300
+
+
+class OtpVerifyIn(BaseModel):
+    challengeId: str
+    code: Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\d{6}$")]
+
+
+class UserOut(BaseModel):
+    id: int
+    phone: str
+    name: str | None = None
+
+
+class OtpVerifyOut(BaseModel):
+    token: str
+    expiresInSeconds: int = 604800
+    user: UserOut
