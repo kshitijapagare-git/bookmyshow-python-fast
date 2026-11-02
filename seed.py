@@ -1,11 +1,12 @@
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import Base, SessionLocal, engine
-from app.models import Cinema, City, Movie, Screen, Show
+from app.models import Cinema, City, Movie, Screen, SeatCategory, Show
 from app.timeutil import utc_from_ist
 
 CITIES: list[dict[str, str]] = [
@@ -65,6 +66,14 @@ SHOW_FORMATS: list[str] = ["2K LASER DOLBY 7.1", "2K DOLBY 7.1", "IMAX 3D"]
 SHOW_CAPACITY = 100
 SEATS_SOLD_FAST_FILLING = 70
 SEATS_SOLD_AVAILABLE = 69
+
+SEAT_CATEGORY_PRICES: dict[str, Decimal] = {
+    "NORMAL": Decimal("180.00"),
+    "EXECUTIVE": Decimal("190.00"),
+    "PREMIUM": Decimal("210.00"),
+    "PREMIUM_XL": Decimal("250.00"),
+    "PREMIUM_PLUS": Decimal("230.00"),
+}
 
 MOVIES: list[dict[str, Any]] = [
     {
@@ -297,6 +306,20 @@ def seed_screens(db: Session) -> None:
     db.commit()
 
 
+def seed_seat_categories(db: Session) -> None:
+    if db.scalar(select(SeatCategory.id).limit(1)) is not None:
+        return
+
+    db.add_all(
+        [
+            SeatCategory(screen_id=screen.id, name=name, price=price)
+            for screen in db.scalars(select(Screen).order_by(Screen.id))
+            for name, price in SEAT_CATEGORY_PRICES.items()
+        ]
+    )
+    db.commit()
+
+
 def seed_shows(db: Session) -> None:
     if db.scalar(select(Show.id).limit(1)) is not None:
         return
@@ -344,6 +367,7 @@ def seed_data(db: Session) -> None:
     seed_cinemas(db)
     seed_movies(db)
     seed_screens(db)
+    seed_seat_categories(db)
     seed_shows(db)
 
 

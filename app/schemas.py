@@ -136,7 +136,49 @@ class ShowMovieOut(BaseModel):
     genres: str
 
 
+class SeatCategoryName(str, Enum):
+    NORMAL = "NORMAL"
+    EXECUTIVE = "EXECUTIVE"
+    PREMIUM = "PREMIUM"
+    PREMIUM_XL = "PREMIUM_XL"
+    PREMIUM_PLUS = "PREMIUM_PLUS"
+
+
+class TimeOfDay(str, Enum):
+    MORNING = "MORNING"
+    AFTERNOON = "AFTERNOON"
+    EVENING = "EVENING"
+    NIGHT = "NIGHT"
+
+
+class ShowSort(str, Enum):
+    NAME = "NAME"
+    EARLIEST = "EARLIEST"
+
+
+class PriceBandOut(BaseModel):
+    min: int = Field(ge=0)
+    max: int | None = None
+
+
+class AvailableFiltersOut(BaseModel):
+    priceBands: list[PriceBandOut]
+    formats: list[str]
+
+
+class AppliedFiltersOut(BaseModel):
+    priceMin: int | None = None
+    priceMax: int | None = None
+    timeOfDay: list[TimeOfDay] = Field(default_factory=list)
+    format: list[str] = Field(default_factory=list)
+    cancellable: bool | None = None
+    wheelchair: bool | None = None
+    sort: ShowSort = ShowSort.NAME
+
+
 class MovieShowsOut(BaseModel):
     movie: ShowMovieOut
     dates: list[ShowDateOut]
     cinemas: list[ShowCinemaOut]
+    appliedFilters: AppliedFiltersOut
+    availableFilters: AvailableFiltersOut
