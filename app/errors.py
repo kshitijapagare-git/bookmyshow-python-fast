@@ -8,20 +8,27 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .seating import SeatsUnavailableError
 
 
-def _problem_detail_response(request: Request, status_code: int, detail: str) -> JSONResponse:
+def problem_detail_content(
+    status_code: int, detail: str, instance: str
+) -> dict[str, object]:
+    """The RFC 7807 body every error response in the API shares."""
     try:
         title = HTTPStatus(status_code).phrase
     except ValueError:
         title = "Error"
+    return {
+        "type": "about:blank",
+        "title": title,
+        "status": status_code,
+        "detail": detail,
+        "instance": instance,
+    }
+
+
+def _problem_detail_response(request: Request, status_code: int, detail: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
-        content={
-            "type": "about:blank",
-            "title": title,
-            "status": status_code,
-            "detail": detail,
-            "instance": request.url.path,
-        },
+        content=problem_detail_content(status_code, detail, request.url.path),
     )
 
 
