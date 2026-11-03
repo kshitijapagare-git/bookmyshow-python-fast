@@ -1,4 +1,6 @@
+import logging
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -10,9 +12,17 @@ from sqlalchemy.orm import Session
 from .db import get_db
 from .models import User
 
+logger = logging.getLogger(__name__)
+
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-only-insecure-jwt-secret-change-me")
 JWT_ALGORITHM = "HS256"
 JWT_TTL_SECONDS = 604800
+
+OTP_DEV_FIXED_CODE = os.getenv("OTP_DEV_FIXED_CODE", "").strip()
+if OTP_DEV_FIXED_CODE and not re.fullmatch(r"\d{6}", OTP_DEV_FIXED_CODE):
+    raise RuntimeError("OTP_DEV_FIXED_CODE must be exactly 6 digits")
+if OTP_DEV_FIXED_CODE:
+    logger.warning("OTP_DEV_FIXED_CODE is set: every OTP uses the fixed development code")
 
 UNAUTHORIZED_DETAIL = "Unauthorized"
 
@@ -26,6 +36,8 @@ def _unauthorized() -> HTTPException:
 
 
 def generate_code() -> str:
+    if OTP_DEV_FIXED_CODE:
+        return OTP_DEV_FIXED_CODE
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
