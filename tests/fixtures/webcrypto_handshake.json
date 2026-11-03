@@ -1,0 +1,9 @@
+{
+  "note": "Cross-language handshake snapshot: wrappedKey is an AES-256 session key wrapped with the public half of privateKeyPem using RSA-OAEP with SHA-256 for both the digest and MGF1, which is what Web Crypto's RSA-OAEP-256 uses. The null placeholders below are filled in from Node's crypto.subtle by tests/fixtures/webcrypto_handshake.mjs, which tests/test_crypto.py runs on the first run: node tests/fixtures/webcrypto_handshake.mjs > tests/fixtures/webcrypto_handshake.json",
+  "kid": "2026-10-a",
+  "alg": "RSA-OAEP-256",
+  "privateKeyPem": null,
+  "publicJwk": null,
+  "aesKeyB64": null,
+  "wrappedKey": null
+}

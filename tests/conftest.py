@@ -1,6 +1,9 @@
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
+# Keep the existing controller tests on the plain path; the crypto tests turn it on
+# through create_app(CryptoSettings(...)) instead of an environment variable.
+os.environ.setdefault("CRYPTO_ENABLED", "false")
 
 import pytest
 from fastapi.testclient import TestClient
