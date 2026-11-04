@@ -62,6 +62,8 @@ from app.crypto.middleware import (
 )
 from app.db import Base, SessionLocal, engine
 from app.main import create_app
+from app.models import User
+from app.security import issue_token
 from seed import seed_data
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "webcrypto_handshake.json"
@@ -240,6 +242,60 @@ def test_encrypted_round_trip_through_otp_request(encrypted_client: TestClient) 
     assert body["resendAfterSeconds"] == 30
     assert body["expiresInSeconds"] == 300
     assert len(body["challengeId"]) == 36
+
+
+def _user_token(
+    phone: str = "+919876543210", name: str | None = None
+) -> tuple[int, str]:
+    """Insert a signed-in moviegoer straight into the database and mint their JWT."""
+    with SessionLocal() as db:
+        user = User(phone=phone, name=name)
+        db.add(user)
+        db.commit()
+        return user.id, issue_token(user_id=user.id)
+
+
+def test_encrypted_put_me_renames_and_returns_an_encrypted_user(
+    encrypted_client: TestClient,
+) -> None:
+    session_id, aes_key = handshake(encrypted_client)
+    user_id, token = _user_token()
+
+    headers, envelope = seal_request(
+        encrypted_client, session_id, aes_key, "PUT", "/api/me", {"name": "Kshitija"}
+    )
+    headers["Authorization"] = f"Bearer {token}"
+
+    response = _send(encrypted_client, "PUT", "/api/me", headers, envelope)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    assert "Kshitija" not in response.text
+    assert b"Kshitija" not in response.content
+
+    body = open_response(aes_key, 200, envelope["iv"], response.json())
+    assert set(body) == {"id", "phone", "name"}
+    assert body["id"] == user_id
+    assert body["name"] == "Kshitija"
+
+
+def test_plain_json_put_me_is_415(encrypted_client: TestClient) -> None:
+    _, token = _user_token(phone="+919876543211")
+
+    response = encrypted_client.put(
+        "/api/me",
+        json={"name": "Test"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 415
+    body = response.json()
+    assert set(body) == PROBLEM_DETAIL_KEYS
+    assert body["title"] == "Unsupported Media Type"
+    assert body["status"] == 415
+    assert body["detail"] == PLAIN_BODY_DETAIL
+    assert body["instance"] == "/api/me"
+    assert response.headers["content-type"] == "application/json"
 
 
 def test_bodyless_get_returns_an_encrypted_response(

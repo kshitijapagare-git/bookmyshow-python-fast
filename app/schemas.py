@@ -2,7 +2,14 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -256,6 +263,19 @@ class UserOut(BaseModel):
     id: int
     phone: str
     name: str | None = None
+
+
+class UpdateNameRequest(BaseModel):
+    """A name to store, trimmed before the 1–80 check sees it."""
+
+    name: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _trim_name(cls, data: object) -> object:
+        if isinstance(data, dict) and isinstance(data.get("name"), str):
+            return {**data, "name": data["name"].strip()}
+        return data
 
 
 class OtpVerifyOut(BaseModel):
