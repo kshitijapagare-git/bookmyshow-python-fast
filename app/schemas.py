@@ -298,3 +298,24 @@ class SeatHoldOut(BaseModel):
     heldUntil: datetime
     seats: list[HeldSeatOut]
     total: float
+
+
+class BookingStatus(str, Enum):
+    PENDING_PAYMENT = "PENDING_PAYMENT"
+    CONFIRMED = "CONFIRMED"
+    FAILED = "FAILED"
+
+
+class BookingCreate(BaseModel):
+    holdId: NonBlank
+
+
+class BookingOut(BaseModel):
+    bookingId: int
+    showId: int
+    holdId: str
+    status: BookingStatus
+    seats: list[HeldSeatOut]
+    total: float
+    paymentId: int | None = None
+    createdAt: datetime
