@@ -309,6 +309,19 @@ class BookingStatus(str, Enum):
 
 class BookingCreate(BaseModel):
     holdId: NonBlank
+    promoCode: str | None = None
+
+
+class BookingQuoteIn(BaseModel):
+    holdId: NonBlank
+    promoCode: NonBlank
+
+
+class BookingQuoteOut(BaseModel):
+    originalAmount: float
+    discount: float
+    total: float
+    promoCode: str
 
 
 class BookingOut(BaseModel):
@@ -321,6 +334,9 @@ class BookingOut(BaseModel):
     paymentId: int | None = None
     createdAt: datetime
     refundedAt: datetime | None = None
+    promoCode: str | None = None
+    originalAmount: float | None = None
+    discount: float | None = None
 
 
 class BookingCancelOut(BaseModel):

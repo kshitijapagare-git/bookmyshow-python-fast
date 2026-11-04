@@ -202,6 +202,11 @@ class Booking(Base):
     hold_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     seat_ids: Mapped[list[int]] = mapped_column(JSON, nullable=False)
     total: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    promo_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    original_amount: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 2), nullable=True
+    )
+    discount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="PENDING_PAYMENT"
     )
