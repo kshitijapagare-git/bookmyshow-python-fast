@@ -19,6 +19,7 @@ from app.models import Booking, Seat, SeatCategory, ShowSeat, User
 from app.payments_client import (
     PaymentDeclinedError,
     PaymentsUnavailableError,
+    PromoCodeInvalidError,
     get_payments_client,
 )
 from app.schemas import ShowSeatStatus
@@ -27,19 +28,39 @@ from app.security import issue_token
 BOOKINGS_URL = "/api/bookings"
 DECLINE_DETAIL = "Payment declined"
 UNAVAILABLE_DETAIL = "Payment service unavailable"
+PROMO_INVALID_DETAIL = "That promo code is not valid."
 NOT_OWNER_DETAIL = "This hold belongs to another user"
 EXPIRED_DETAIL = "Hold has expired"
 PAYMENT_ID = 7
 PROBLEM_DETAIL_KEYS = {"type", "title", "status", "detail", "instance"}
 CENT = Decimal("0.01")
+PROMO_PERCENT = Decimal("20")
 
 
 class _FakePaymentsClient:
-    """Stand-in for PaymentsClient: records each charge and answers as told."""
+    """Stand-in for PaymentsClient: records each quote and charge and answers as told."""
 
-    def __init__(self, outcome: str = "succeed") -> None:
+    def __init__(self, outcome: str = "succeed", promo_outcome: str = "succeed") -> None:
         self.outcome = outcome
+        self.promo_outcome = promo_outcome
         self.calls: list[dict[str, object]] = []
+        self.quotes: list[dict[str, object]] = []
+
+    def quote_payment(
+        self, *, booking_id: int, amount: Decimal, promo_code: str
+    ) -> dict[str, object]:
+        self.quotes.append(
+            {"booking_id": booking_id, "amount": amount, "promo_code": promo_code}
+        )
+        if self.promo_outcome == "invalid":
+            raise PromoCodeInvalidError(PROMO_INVALID_DETAIL)
+        discount = (amount * PROMO_PERCENT / 100).quantize(CENT)
+        return {
+            "originalAmount": float(amount),
+            "discount": float(discount),
+            "total": float(amount - discount),
+            "promoCode": promo_code.strip().upper(),
+        }
 
     def create_payment(
         self,
@@ -48,6 +69,7 @@ class _FakePaymentsClient:
         amount: Decimal,
         currency: str = "INR",
         idempotency_key: str,
+        promo_code: str | None = None,
     ) -> dict[str, object]:
         self.calls.append(
             {
@@ -55,6 +77,7 @@ class _FakePaymentsClient:
                 "amount": amount,
                 "currency": currency,
                 "idempotency_key": idempotency_key,
+                "promo_code": promo_code,
             }
         )
         if self.outcome == "decline":
@@ -138,6 +161,88 @@ def _booking_key() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
+def test_booking_with_valid_promo_persists_the_breakdown(client) -> None:
+    user_id = _create_user("+919000000510")
+    _, seat_ids, hold_id = _create_hold(client, user_id, 2)
+    expected_original = _expected_total(seat_ids)
+    expected_discount = (expected_original * PROMO_PERCENT / 100).quantize(CENT)
+    fake = _FakePaymentsClient()
+
+    with _use_payments(fake):
+        response = client.post(
+            BOOKINGS_URL,
+            json={"holdId": hold_id, "promoCode": " b1g1 "},
+            headers={**_auth(user_id), **_booking_key()},
+        )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "CONFIRMED"
+    assert body["promoCode"] == "B1G1"
+    assert Decimal(str(body["originalAmount"])) == expected_original
+    assert Decimal(str(body["discount"])) == expected_discount
+    assert Decimal(str(body["total"])) == expected_original - expected_discount
+
+    assert len(fake.quotes) == 1
+    quote = fake.quotes[0]
+    assert quote["amount"] == expected_original
+    assert quote["promo_code"] == " b1g1 "
+
+    assert len(fake.calls) == 1
+    charge = fake.calls[0]
+    assert charge["amount"] == expected_original - expected_discount
+    assert charge["promo_code"] == "B1G1"
+
+    with SessionLocal() as db:
+        booking = db.get(Booking, body["bookingId"])
+        assert booking is not None
+        assert booking.status == "CONFIRMED"
+        assert booking.promo_code == "B1G1"
+        assert Decimal(booking.original_amount) == expected_original
+        assert Decimal(booking.discount) == expected_discount
+        assert Decimal(booking.total) == expected_original - expected_discount
+
+    read = client.get(f"{BOOKINGS_URL}/{body['bookingId']}", headers=_auth(user_id))
+
+    assert read.status_code == 200
+    read_body = read.json()
+    assert read_body["promoCode"] == "B1G1"
+    assert read_body["originalAmount"] == body["originalAmount"]
+    assert read_body["discount"] == body["discount"]
+    assert read_body["total"] == body["total"]
+
+
+def test_booking_with_invalid_promo_returns_400_and_creates_nothing(client) -> None:
+    user_id = _create_user("+919000000511")
+    _, seat_ids, hold_id = _create_hold(client, user_id, 1)
+    fake = _FakePaymentsClient(promo_outcome="invalid")
+
+    with _use_payments(fake):
+        response = client.post(
+            BOOKINGS_URL,
+            json={"holdId": hold_id, "promoCode": "NOPE"},
+            headers={**_auth(user_id), **_booking_key()},
+        )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert set(body) == PROBLEM_DETAIL_KEYS
+    assert body["type"] == "about:blank"
+    assert body["title"] == "Bad Request"
+    assert body["status"] == 400
+    assert body["detail"] == PROMO_INVALID_DETAIL
+    assert body["instance"] == BOOKINGS_URL
+    assert len(fake.quotes) == 1
+    assert fake.calls == []
+
+    with SessionLocal() as db:
+        assert list(db.scalars(select(Booking))) == []
+        row = db.get(ShowSeat, seat_ids[0])
+        assert row is not None
+        assert row.status == ShowSeatStatus.HELD.value
+        assert row.hold_id == hold_id
+
+
 def test_booking_success_confirms_and_sells_seats(client) -> None:
     user_id = _create_user("+919000000501")
     show_id, seat_ids, hold_id = _create_hold(client, user_id, 2)
@@ -163,6 +268,9 @@ def test_booking_success_confirms_and_sells_seats(client) -> None:
         "paymentId",
         "createdAt",
         "refundedAt",
+        "promoCode",
+        "originalAmount",
+        "discount",
     }
     assert body["status"] == "CONFIRMED"
     assert body["showId"] == show_id

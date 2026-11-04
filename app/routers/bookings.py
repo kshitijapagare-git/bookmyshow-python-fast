@@ -7,6 +7,7 @@ from ..bookings import (
     create_booking,
     find_booking,
     get_booking,
+    quote_hold,
 )
 from ..db import get_db
 from ..models import Booking, Seat, ShowSeat, User
@@ -15,6 +16,8 @@ from ..schemas import (
     BookingCancelOut,
     BookingCreate,
     BookingOut,
+    BookingQuoteIn,
+    BookingQuoteOut,
     BookingStatus,
     HeldSeatOut,
 )
@@ -35,6 +38,13 @@ def _booking_out(booking: Booking, seats: list[HeldSeatOut]) -> BookingOut:
         paymentId=booking.payment_id,
         createdAt=booking.created_at,
         refundedAt=booking.refunded_at,
+        promoCode=booking.promo_code,
+        originalAmount=(
+            float(booking.original_amount)
+            if booking.original_amount is not None
+            else None
+        ),
+        discount=float(booking.discount) if booking.discount is not None else None,
     )
 
 
@@ -70,6 +80,7 @@ def post_booking(
         idempotency_key=idempotency_key,
         user=user,
         client=client,
+        promo_code=payload.promoCode,
     )
     if replay is not None:
         response.status_code = status.HTTP_200_OK
@@ -84,6 +95,31 @@ def read_booking(
 ) -> BookingOut:
     booking = get_booking(db=db, booking_id=booking_id, user=user)
     return _booking_out(booking, _seats_out(db, booking.seat_ids))
+
+
+@router.post(
+    "/bookings/quote", response_model=BookingQuoteOut, status_code=status.HTTP_200_OK
+)
+def post_booking_quote(
+    payload: BookingQuoteIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    client: PaymentsClient = Depends(get_payments_client),
+) -> BookingQuoteOut:
+    """Price a promo code against the caller's live hold; nothing is charged."""
+    quote = quote_hold(
+        db=db,
+        hold_id=payload.holdId,
+        promo_code=payload.promoCode,
+        user=user,
+        client=client,
+    )
+    return BookingQuoteOut(
+        originalAmount=float(quote["originalAmount"]),
+        discount=float(quote["discount"]),
+        total=float(quote["total"]),
+        promoCode=str(quote["promoCode"]),
+    )
 
 
 @router.post(

@@ -48,6 +48,7 @@ class _FakePaymentsClient:
         amount: Decimal,
         currency: str = "INR",
         idempotency_key: str,
+        promo_code: str | None = None,
     ) -> dict[str, object]:
         self.calls.append(
             {
