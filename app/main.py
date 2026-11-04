@@ -9,7 +9,18 @@ from .crypto.middleware import CryptoMiddleware
 from .crypto.sessions import SessionStore
 from .db import Base, SessionLocal, engine
 from .errors import register_error_handlers
-from .routers import auth, cities, cinemas, crypto, holds, movies, seats, shows
+from .payments_client import PaymentsSettings
+from .routers import (
+    auth,
+    bookings,
+    cities,
+    cinemas,
+    crypto,
+    holds,
+    movies,
+    seats,
+    shows,
+)
 from .seating import HOLD_SWEEP_INTERVAL_SECONDS, release_expired_holds
 from seed import seed_data
 
@@ -47,6 +58,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application = FastAPI(title="BookMyShow API", version="0.1.0", lifespan=lifespan)
     application.state.crypto_keys = load_key_pair(resolved)
     application.state.crypto_sessions = SessionStore()
+    application.state.payments_settings = PaymentsSettings.from_env()
 
     if resolved.enabled:
         application.add_middleware(
@@ -65,6 +77,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.include_router(auth.router)
     application.include_router(auth.me_router)
     application.include_router(holds.router)
+    application.include_router(bookings.router)
     application.include_router(crypto.router)
     return application
 

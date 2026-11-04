@@ -193,6 +193,27 @@ class User(Base):
         self.name = name.strip()
 
 
+class Booking(Base):
+    __tablename__ = "bookings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    show_id: Mapped[int] = mapped_column(ForeignKey("shows.id"), nullable=False)
+    hold_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    seat_ids: Mapped[list[int]] = mapped_column(JSON, nullable=False)
+    total: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="PENDING_PAYMENT"
+    )
+    payment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
 class OtpChallenge(Base):
     __tablename__ = "otp_challenges"
 
