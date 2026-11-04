@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
+import httpx
 from sqlalchemy import select
 
 from app.db import SessionLocal
@@ -10,9 +11,11 @@ PHONE = "9876543210"
 E164_PHONE = "+919876543210"
 REQUEST_URL = "/api/auth/otp/request"
 VERIFY_URL = "/api/auth/otp/verify"
+ME_URL = "/api/me"
 WRONG_CODE_DETAIL = "That code is not right"
 EXPIRED_DETAIL = "This code has expired. Request a new one."
 LOCKED_DETAIL = "Too many wrong attempts. Request a new code."
+NAME_DETAIL = "Name must be 1–80 characters"
 
 
 def _as_utc(moment: datetime) -> datetime:
@@ -39,6 +42,11 @@ def _new_challenge(client, sms_outbox) -> tuple[str, str]:
 
 def _wrong_code(code: str) -> str:
     return "000000" if code != "000000" else "111111"
+
+
+def _put_name(client, token: str | None, payload: dict) -> httpx.Response:
+    headers = {"Authorization": f"Bearer {token}"} if token is not None else {}
+    return client.put(ME_URL, json=payload, headers=headers)
 
 
 def test_request_otp_returns_202_and_stores_bcrypt_hash(client, sms_outbox):
@@ -261,6 +269,93 @@ def test_me_returns_user_with_token_and_401_without(client, sms_outbox):
 
     assert garbage.status_code == 401
     assert garbage.json()["title"] == "Unauthorized"
+
+
+def test_put_me_renames_and_get_me_returns_the_new_name(client, sms_outbox):
+    challenge_id, code = _new_challenge(client, sms_outbox)
+    signed_in = _verify(client, challenge_id, code)
+    assert signed_in.status_code == 200
+    token = signed_in.json()["token"]
+    user_id = signed_in.json()["user"]["id"]
+
+    response = _put_name(client, token, {"name": "Kshitija"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"id", "phone", "name"}
+    assert body["id"] == user_id
+    assert body["phone"] == E164_PHONE
+    assert body["name"] == "Kshitija"
+
+    padded = _put_name(client, token, {"name": "  Kshitija  "})
+
+    assert padded.status_code == 200
+    assert padded.json()["name"] == "Kshitija"
+
+    me = client.get(ME_URL, headers={"Authorization": f"Bearer {token}"})
+
+    assert me.status_code == 200
+    assert me.json() == {"id": user_id, "phone": E164_PHONE, "name": "Kshitija"}
+
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        assert user is not None
+        assert user.name == "Kshitija"
+
+
+def test_put_me_rejects_blank_and_too_long_names(client, sms_outbox):
+    challenge_id, code = _new_challenge(client, sms_outbox)
+    signed_in = _verify(client, challenge_id, code)
+    assert signed_in.status_code == 200
+    token = signed_in.json()["token"]
+    user_id = signed_in.json()["user"]["id"]
+
+    for bad_name in ("", "   ", "K" * 81, " " + "K" * 81 + " "):
+        response = _put_name(client, token, {"name": bad_name})
+
+        assert response.status_code == 400, bad_name
+        body = response.json()
+        assert body["type"] == "about:blank"
+        assert body["title"] == "Bad Request"
+        assert body["status"] == 400
+        assert body["detail"] == NAME_DETAIL
+        assert body["instance"] == ME_URL
+
+        with SessionLocal() as db:
+            user = db.get(User, user_id)
+            assert user is not None
+            assert user.name is None
+
+    at_limit = _put_name(client, token, {"name": "K" * 80})
+
+    assert at_limit.status_code == 200
+    assert at_limit.json()["name"] == "K" * 80
+
+
+def test_put_me_requires_a_token(client, sms_outbox):
+    challenge_id, code = _new_challenge(client, sms_outbox)
+    signed_in = _verify(client, challenge_id, code)
+    assert signed_in.status_code == 200
+    user_id = signed_in.json()["user"]["id"]
+
+    missing = _put_name(client, None, {"name": "Kshitija"})
+
+    assert missing.status_code == 401
+    body = missing.json()
+    assert body["type"] == "about:blank"
+    assert body["title"] == "Unauthorized"
+    assert body["status"] == 401
+    assert body["instance"] == ME_URL
+
+    garbage = _put_name(client, "not-a-jwt", {"name": "Kshitija"})
+
+    assert garbage.status_code == 401
+    assert garbage.json()["title"] == "Unauthorized"
+
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        assert user is not None
+        assert user.name is None
 
 
 def test_public_endpoints_stay_open(client):

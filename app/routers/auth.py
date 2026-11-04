@@ -10,7 +10,14 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import OtpChallenge, OtpRequest, User
-from ..schemas import OtpRequestIn, OtpRequestOut, OtpVerifyIn, OtpVerifyOut, UserOut
+from ..schemas import (
+    OtpRequestIn,
+    OtpRequestOut,
+    OtpVerifyIn,
+    OtpVerifyOut,
+    UpdateNameRequest,
+    UserOut,
+)
 from ..security import (
     JWT_TTL_SECONDS,
     generate_code,
@@ -35,6 +42,9 @@ COUNTRY_CODE_DETAIL = "countryCode must be +91"
 WRONG_CODE_DETAIL = "That code is not right"
 EXPIRED_DETAIL = "This code has expired. Request a new one."
 LOCKED_DETAIL = "Too many wrong attempts. Request a new code."
+NAME_MIN_LENGTH = 1
+NAME_MAX_LENGTH = 80
+NAME_DETAIL = "Name must be 1–80 characters"
 
 
 def _now() -> datetime:
@@ -194,4 +204,21 @@ def verify_otp(
 
 @me_router.get("/me", response_model=UserOut)
 def get_me(user: User = Depends(get_current_user)) -> UserOut:
+    return UserOut(id=user.id, phone=user.phone, name=user.name)
+
+
+@me_router.put("/me", response_model=UserOut)
+def update_me(
+    payload: UpdateNameRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UserOut:
+    """Store the trimmed name the client sent; it arrives already trimmed by the schema."""
+    if not NAME_MIN_LENGTH <= len(payload.name) <= NAME_MAX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=NAME_DETAIL
+        )
+
+    user.rename(payload.name)
+    db.commit()
     return UserOut(id=user.id, phone=user.phone, name=user.name)

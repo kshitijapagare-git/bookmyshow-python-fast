@@ -188,6 +188,10 @@ class User(Base):
         default=lambda: datetime.now(timezone.utc),
     )
 
+    def rename(self, name: str) -> None:
+        """Store a trimmed name; the caller owns the transaction."""
+        self.name = name.strip()
+
 
 class OtpChallenge(Base):
     __tablename__ = "otp_challenges"
