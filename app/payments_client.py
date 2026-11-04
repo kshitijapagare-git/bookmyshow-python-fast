@@ -127,6 +127,36 @@ class PaymentsClient:
 
         raise PaymentsUnavailableError(last_error)
 
+    def refund_payment(
+        self, *, payment_id: int, idempotency_key: str
+    ) -> dict[str, object]:
+        """Reverse a charge; every failure raises so the caller keeps the booking paid."""
+        url = f"{self.settings.base_url}/internal/payments/{payment_id}/refund"
+        headers = {
+            "X-Service-Token": self.settings.service_token,
+            "Idempotency-Key": idempotency_key,
+        }
+
+        try:
+            response = httpx.post(
+                url, headers=headers, timeout=self.settings.timeout_seconds
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("payments service refund transport error: %s", exc)
+            raise PaymentsUnavailableError(str(exc)) from None
+
+        if not 200 <= response.status_code < 300:
+            raise PaymentsUnavailableError(
+                f"payments service answered {response.status_code}"
+            )
+
+        try:
+            return response.json()
+        except ValueError:
+            raise PaymentsUnavailableError(
+                "payments service answered with a non-JSON body"
+            ) from None
+
 
 def get_payments_client(request: Request) -> PaymentsClient:
     """Build a client from the settings `create_app` put on app.state."""

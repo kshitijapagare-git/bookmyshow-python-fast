@@ -22,6 +22,7 @@ from .schemas import BookingStatus, ShowSeatStatus
 from .seating import effective_status
 
 BOOKING_CURRENCY = "INR"
+PAYMENT_REFUND_FAILED_DETAIL = "Refund could not be processed"
 NOT_OWNER_DETAIL = "This hold belongs to another user"
 HOLD_EXPIRED_DETAIL = "Hold has expired"
 PAYMENT_DECLINED_DETAIL = "Payment declined"
@@ -163,4 +164,48 @@ def get_booking(*, db: Session, booking_id: int, user: User) -> Booking:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This booking belongs to another user",
         )
+    return booking
+
+
+def cancel_booking(
+    *,
+    db: Session,
+    booking_id: int,
+    user: User,
+    client: PaymentsClient,
+    now: datetime | None = None,
+) -> Booking:
+    """Refund a confirmed booking's payment and put its seats back on sale."""
+    booking = get_booking(db=db, booking_id=booking_id, user=user)
+    if booking.status != BookingStatus.CONFIRMED.value:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Booking is already {booking.status}",
+        )
+    if booking.payment_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=PAYMENT_REFUND_FAILED_DETAIL,
+        )
+
+    try:
+        client.refund_payment(
+            payment_id=booking.payment_id,
+            idempotency_key=f"cancel-{booking.id}",
+        )
+    except PaymentsUnavailableError:
+        # Nothing is written before the call, so the booking stays CONFIRMED and paid.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=PAYMENT_REFUND_FAILED_DETAIL,
+        ) from None
+
+    moment = now if now is not None else datetime.now(timezone.utc)
+    booking.status = BookingStatus.CANCELLED.value
+    booking.refunded_at = moment
+    _release(
+        db,
+        list(db.scalars(select(ShowSeat).where(ShowSeat.id.in_(booking.seat_ids)))),
+    )
+    db.commit()
     return booking

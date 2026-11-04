@@ -162,6 +162,7 @@ def test_booking_success_confirms_and_sells_seats(client) -> None:
         "total",
         "paymentId",
         "createdAt",
+        "refundedAt",
     }
     assert body["status"] == "CONFIRMED"
     assert body["showId"] == show_id

@@ -304,6 +304,7 @@ class BookingStatus(str, Enum):
     PENDING_PAYMENT = "PENDING_PAYMENT"
     CONFIRMED = "CONFIRMED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class BookingCreate(BaseModel):
@@ -319,3 +320,10 @@ class BookingOut(BaseModel):
     total: float
     paymentId: int | None = None
     createdAt: datetime
+    refundedAt: datetime | None = None
+
+
+class BookingCancelOut(BaseModel):
+    id: int
+    status: BookingStatus
+    refundedAt: datetime | None = None

@@ -2,11 +2,22 @@ from fastapi import APIRouter, Depends, Header, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..bookings import create_booking, find_booking, get_booking
+from ..bookings import (
+    cancel_booking as cancel_booking_service,
+    create_booking,
+    find_booking,
+    get_booking,
+)
 from ..db import get_db
 from ..models import Booking, Seat, ShowSeat, User
 from ..payments_client import PaymentsClient, get_payments_client
-from ..schemas import BookingCreate, BookingOut, BookingStatus, HeldSeatOut
+from ..schemas import (
+    BookingCancelOut,
+    BookingCreate,
+    BookingOut,
+    BookingStatus,
+    HeldSeatOut,
+)
 from ..security import get_current_user
 from ..seating import seat_label
 
@@ -23,6 +34,7 @@ def _booking_out(booking: Booking, seats: list[HeldSeatOut]) -> BookingOut:
         total=float(booking.total),
         paymentId=booking.payment_id,
         createdAt=booking.created_at,
+        refundedAt=booking.refunded_at,
     )
 
 
@@ -72,3 +84,25 @@ def read_booking(
 ) -> BookingOut:
     booking = get_booking(db=db, booking_id=booking_id, user=user)
     return _booking_out(booking, _seats_out(db, booking.seat_ids))
+
+
+@router.post(
+    "/bookings/{booking_id}/cancel",
+    response_model=BookingCancelOut,
+    status_code=status.HTTP_200_OK,
+)
+def cancel_booking(
+    booking_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    client: PaymentsClient = Depends(get_payments_client),
+) -> BookingCancelOut:
+    """Refund a confirmed booking and put its seats back on sale."""
+    booking = cancel_booking_service(
+        db=db, booking_id=booking_id, user=user, client=client
+    )
+    return BookingCancelOut(
+        id=booking.id,
+        status=BookingStatus(booking.status),
+        refundedAt=booking.refunded_at,
+    )
