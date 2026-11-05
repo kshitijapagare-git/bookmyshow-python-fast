@@ -198,6 +198,9 @@ class Booking(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    guest_id: Mapped[int | None] = mapped_column(
+        ForeignKey("guests.id"), nullable=True
+    )
     show_id: Mapped[int] = mapped_column(ForeignKey("shows.id"), nullable=False)
     hold_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     seat_ids: Mapped[list[int]] = mapped_column(JSON, nullable=False)
@@ -246,4 +249,35 @@ class OtpRequest(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class Guest(Base):
+    __tablename__ = "guests"
+    __table_args__ = (
+        CheckConstraint(
+            "id_proof_type IN ('AADHAAR','PASSPORT','DRIVING_LICENSE')",
+            name="ck_guests_id_proof_type",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    first_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    last_name: Mapped[str] = mapped_column(String(50), nullable=False)
+    email: Mapped[str] = mapped_column(
+        String(254), nullable=False, unique=True, index=True
+    )
+    phone: Mapped[str] = mapped_column(String(10), nullable=False)
+    id_proof_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    id_proof_number: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )

@@ -7,7 +7,9 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     StringConstraints,
+    model_serializer,
     model_validator,
 )
 
@@ -310,6 +312,7 @@ class BookingStatus(str, Enum):
 class BookingCreate(BaseModel):
     holdId: NonBlank
     promoCode: str | None = None
+    guestId: int | None = None
 
 
 class BookingQuoteIn(BaseModel):
@@ -328,6 +331,7 @@ class BookingOut(BaseModel):
     bookingId: int
     showId: int
     holdId: str
+    guestId: int | None = None
     status: BookingStatus
     seats: list[HeldSeatOut]
     total: float
@@ -338,8 +342,79 @@ class BookingOut(BaseModel):
     originalAmount: float | None = None
     discount: float | None = None
 
+    @model_serializer(mode="wrap")
+    def _omit_absent_guest_id(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        """Leave guestId out of the body when the booking is not linked to a guest."""
+        data = handler(self)
+        if data.get("guestId") is None:
+            data.pop("guestId", None)
+        return data
+
 
 class BookingCancelOut(BaseModel):
     id: int
     status: BookingStatus
     refundedAt: datetime | None = None
+
+
+ID_PROOF_TYPES: frozenset[str] = frozenset(
+    {"AADHAAR", "PASSPORT", "DRIVING_LICENSE"}
+)
+
+GuestName = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)
+]
+GuestEmail = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, pattern=r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$"
+    ),
+]
+
+
+class GuestBase(BaseModel):
+    """A guest profile as the receptionist types it; id proof is checked by the router."""
+
+    firstName: GuestName
+    lastName: GuestName
+    email: GuestEmail
+    phone: Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\d{10}$")]
+    idProofType: str | None = None
+    idProofNumber: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_email(cls, data: object) -> object:
+        if isinstance(data, dict) and isinstance(data.get("email"), str):
+            return {**data, "email": data["email"].strip().lower()}
+        return data
+
+
+class GuestCreate(GuestBase):
+    pass
+
+
+class GuestUpdate(GuestBase):
+    pass
+
+
+class GuestOut(BaseModel):
+    id: int
+    firstName: str
+    lastName: str
+    email: str
+    phone: str
+    idProofType: str
+    idProofNumber: str
+    createdAt: datetime
+    updatedAt: datetime
+
+
+class GuestPageOut(BaseModel):
+    content: list[GuestOut]
+    page: int
+    size: int
+    totalElements: int
+    totalPages: int

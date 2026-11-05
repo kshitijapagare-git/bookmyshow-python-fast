@@ -32,6 +32,7 @@ def _booking_out(booking: Booking, seats: list[HeldSeatOut]) -> BookingOut:
         bookingId=booking.id,
         showId=booking.show_id,
         holdId=booking.hold_id,
+        guestId=booking.guest_id,
         status=BookingStatus(booking.status),
         seats=seats,
         total=float(booking.total),
@@ -81,6 +82,7 @@ def post_booking(
         user=user,
         client=client,
         promo_code=payload.promoCode,
+        guest_id=payload.guestId,
     )
     if replay is not None:
         response.status_code = status.HTTP_200_OK

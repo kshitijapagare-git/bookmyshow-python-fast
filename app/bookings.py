@@ -12,7 +12,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Booking, Seat, SeatCategory, ShowSeat, User
+from .models import Booking, Guest, Seat, SeatCategory, ShowSeat, User
 from .payments_client import (
     PaymentDeclinedError,
     PaymentsClient,
@@ -90,12 +90,19 @@ def create_booking(
     user: User,
     client: PaymentsClient,
     promo_code: str | None = None,
+    guest_id: int | None = None,
     now: datetime | None = None,
 ) -> Booking:
     """Turn a live hold into a paid booking, or fail leaving the hold's seats coherent."""
     existing = find_booking(db=db, user=user, idempotency_key=idempotency_key)
     if existing is not None:
         return existing
+
+    if guest_id is not None and db.get(Guest, guest_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Guest not found: {guest_id}",
+        )
 
     moment = now if now is not None else datetime.now(timezone.utc)
     rows = list(
@@ -145,6 +152,7 @@ def create_booking(
 
     booking = Booking(
         user_id=user.id,
+        guest_id=guest_id,
         show_id=live[0].show_id,
         hold_id=hold_id,
         seat_ids=seat_ids,
