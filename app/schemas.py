@@ -343,3 +343,34 @@ class BookingCancelOut(BaseModel):
     id: int
     status: BookingStatus
     refundedAt: datetime | None = None
+
+
+class ReviewsSummaryOut(BaseModel):
+    average: float
+    count: int
+    distribution: dict[str, int]
+
+
+class ReviewOut(BaseModel):
+    id: int
+    movieId: int
+    userId: int
+    bookingId: int | None = None
+    rating: int = Field(ge=1, le=5)
+    comment: str = Field(default="", max_length=1000)
+    verified: bool = False
+    createdAt: datetime
+
+
+class ReviewsPageOut(BaseModel):
+    summary: ReviewsSummaryOut
+    reviews: list[ReviewOut]
+    page: int
+    pageSize: int
+    total: int
+
+
+class ReviewSubmitIn(BaseModel):
+    bookingId: int = Field(gt=0)
+    rating: int = Field(ge=1, le=5)
+    comment: str = Field(default="", max_length=1000)

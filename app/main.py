@@ -10,6 +10,7 @@ from .crypto.sessions import SessionStore
 from .db import Base, SessionLocal, engine
 from .errors import register_error_handlers
 from .payments_client import PaymentsSettings
+from .reviews_client import ReviewsSettings
 from .routers import (
     auth,
     bookings,
@@ -18,6 +19,7 @@ from .routers import (
     crypto,
     holds,
     movies,
+    reviews,
     seats,
     shows,
 )
@@ -59,6 +61,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.state.crypto_keys = load_key_pair(resolved)
     application.state.crypto_sessions = SessionStore()
     application.state.payments_settings = PaymentsSettings.from_env()
+    application.state.reviews_settings = ReviewsSettings.from_env()
 
     if resolved.enabled:
         application.add_middleware(
@@ -72,6 +75,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.include_router(cities.router)
     application.include_router(cinemas.router)
     application.include_router(movies.router)
+    application.include_router(reviews.router)
     application.include_router(shows.router)
     application.include_router(seats.router)
     application.include_router(auth.router)
