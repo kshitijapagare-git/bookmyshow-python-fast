@@ -237,6 +237,44 @@ class PaymentsClient:
                 "payments service answered with a non-JSON body"
             ) from None
 
+    def list_payments(self, *, booking_id: int) -> list[dict[str, object]]:
+        """Every payment recorded for a booking, newest first; none reads as `[]`."""
+        url = f"{self.settings.base_url}/internal/payments?bookingId={booking_id}"
+        headers = {"X-Service-Token": self.settings.service_token}
+
+        try:
+            response = httpx.get(
+                url, headers=headers, timeout=self.settings.timeout_seconds
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("payments service lookup transport error: %s", exc)
+            raise PaymentsUnavailableError(str(exc)) from None
+
+        if not 200 <= response.status_code < 300:
+            raise PaymentsUnavailableError(
+                f"payments service answered {response.status_code}"
+            )
+
+        try:
+            body = response.json()
+        except ValueError:
+            raise PaymentsUnavailableError(
+                "payments service answered with a non-JSON body"
+            ) from None
+
+        if not isinstance(body, list):
+            raise PaymentsUnavailableError(
+                "payments service answered with something other than a list"
+            )
+        rows: list[dict[str, object]] = []
+        for row in body:
+            if not isinstance(row, dict):
+                raise PaymentsUnavailableError(
+                    "payments service answered with a payment that is not an object"
+                )
+            rows.append(row)
+        return rows
+
 
 def get_payments_client(request: Request) -> PaymentsClient:
     """Build a client from the settings `create_app` put on app.state."""
