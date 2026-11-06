@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from .db import Base, SessionLocal, engine
-from .routers import cities, cinemas, movies
+from .routers import bookings, cities, cinemas, movies, transfers
 from seed import seed_movies
 
 
@@ -24,5 +24,7 @@ app = FastAPI(title="BookMyShow API", version="0.1.0", lifespan=lifespan)
 app.include_router(cities.router)
 app.include_router(cinemas.router)
 app.include_router(movies.router)
+app.include_router(bookings.router)
+app.include_router(transfers.router)
 
 init_db()
