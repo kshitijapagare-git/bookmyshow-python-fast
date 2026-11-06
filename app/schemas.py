@@ -345,6 +345,40 @@ class BookingCancelOut(BaseModel):
     refundedAt: datetime | None = None
 
 
+class MemberPaymentStatus(str, Enum):
+    PENDING = "PENDING"
+    PAID = "PAID"
+    REFUNDED = "REFUNDED"
+
+
+class GroupCreate(BaseModel):
+    holdId: NonBlank
+
+
+class GroupJoin(BaseModel):
+    inviteCode: NonBlank
+
+
+class GroupMemberOut(BaseModel):
+    userId: int
+    seatIds: list[int]
+    seats: list[HeldSeatOut]
+    shareAmount: float
+    paymentStatus: MemberPaymentStatus
+
+
+class GroupOut(BaseModel):
+    groupId: int
+    inviteCode: str
+    status: BookingStatus
+    showId: int
+    ownerId: int
+    seatIds: list[int]
+    expiresAt: datetime
+    total: float
+    members: list[GroupMemberOut]
+
+
 class ReviewsSummaryOut(BaseModel):
     average: float
     count: int
@@ -356,6 +390,7 @@ class ReviewOut(BaseModel):
     movieId: int
     userId: int
     bookingId: int | None = None
+    groupId: int | None = None
     rating: int = Field(ge=1, le=5)
     comment: str = Field(default="", max_length=1000)
     verified: bool = False
@@ -371,6 +406,21 @@ class ReviewsPageOut(BaseModel):
 
 
 class ReviewSubmitIn(BaseModel):
-    bookingId: int = Field(gt=0)
+    """A review against exactly one source: the caller's booking or their group share."""
+
+    bookingId: int | None = Field(default=None, gt=0)
+    groupId: int | None = Field(default=None, gt=0)
     rating: int = Field(ge=1, le=5)
     comment: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "ReviewSubmitIn":
+        if (self.bookingId is None) == (self.groupId is None):
+            raise ValueError("exactly one of bookingId or groupId is required")
+        return self
+
+
+class ReviewEligibilityOut(BaseModel):
+    eligible: bool
+    movieId: int
+    showStartsAt: datetime

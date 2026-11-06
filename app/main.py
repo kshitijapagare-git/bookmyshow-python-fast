@@ -17,6 +17,7 @@ from .routers import (
     cities,
     cinemas,
     crypto,
+    groups,
     holds,
     movies,
     reviews,
@@ -82,6 +83,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.include_router(auth.me_router)
     application.include_router(holds.router)
     application.include_router(bookings.router)
+    application.include_router(groups.router)
     application.include_router(crypto.router)
     return application
 

@@ -126,6 +126,7 @@ class ReviewsClient:
         movie_id: int,
         user_id: int,
         booking_id: int | None,
+        group_id: int | None = None,
         rating: int,
         comment: str,
         verified: bool,
@@ -140,6 +141,9 @@ class ReviewsClient:
             "comment": comment,
             "verified": verified,
         }
+        # A booking review sends exactly what it sent before: groupId only when set.
+        if group_id is not None:
+            payload["groupId"] = group_id
         headers = {"X-Service-Token": self.settings.service_token}
 
         last_error = "reviews service did not answer"

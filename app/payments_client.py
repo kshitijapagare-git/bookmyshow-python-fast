@@ -148,6 +148,51 @@ class PaymentsClient:
 
         raise PaymentsUnavailableError(last_error)
 
+    def create_group_share(
+        self, *, group_id: int, user_id: int, amount: Decimal, currency: str = "INR"
+    ) -> dict[str, object]:
+        """Charge one member's share; `group:{id}:{user}` makes a replay free."""
+        url = f"{self.settings.base_url}/internal/payments"
+        payload: dict[str, object] = {
+            "groupId": group_id,
+            "userId": user_id,
+            "amount": float(amount),
+            "currency": currency,
+        }
+        headers = {
+            "X-Service-Token": self.settings.service_token,
+            "Idempotency-Key": f"group:{group_id}:{user_id}",
+        }
+
+        try:
+            response = httpx.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.settings.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("payments service group share transport error: %s", exc)
+            raise PaymentsUnavailableError(str(exc)) from None
+
+        if not 200 <= response.status_code < 300:
+            raise PaymentsUnavailableError(
+                f"payments service answered {response.status_code}"
+            )
+
+        try:
+            body = response.json()
+        except ValueError:
+            raise PaymentsUnavailableError(
+                "payments service answered with a non-JSON body"
+            ) from None
+
+        if not isinstance(body, dict):
+            raise PaymentsUnavailableError(
+                "payments service answered with something other than an object"
+            )
+        return body
+
     def quote_payment(
         self, *, booking_id: int, amount: Decimal, promo_code: str
     ) -> dict[str, object]:
@@ -262,6 +307,46 @@ class PaymentsClient:
                 "payments service answered with a non-JSON body"
             ) from None
 
+        if not isinstance(body, list):
+            raise PaymentsUnavailableError(
+                "payments service answered with something other than a list"
+            )
+        rows: list[dict[str, object]] = []
+        for row in body:
+            if not isinstance(row, dict):
+                raise PaymentsUnavailableError(
+                    "payments service answered with a payment that is not an object"
+                )
+            rows.append(row)
+        return rows
+
+    def list_group_payments(self, *, group_id: int) -> list[dict[str, object]]:
+        """Every share recorded for a group, newest first; none reads as `[]`."""
+        url = f"{self.settings.base_url}/internal/payments?groupId={group_id}"
+        headers = {"X-Service-Token": self.settings.service_token}
+
+        try:
+            response = httpx.get(
+                url, headers=headers, timeout=self.settings.timeout_seconds
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("payments service group lookup transport error: %s", exc)
+            raise PaymentsUnavailableError(str(exc)) from None
+
+        if not 200 <= response.status_code < 300:
+            raise PaymentsUnavailableError(
+                f"payments service answered {response.status_code}"
+            )
+
+        try:
+            body = response.json()
+        except ValueError:
+            raise PaymentsUnavailableError(
+                "payments service answered with a non-JSON body"
+            ) from None
+
+        if body is None:
+            return []
         if not isinstance(body, list):
             raise PaymentsUnavailableError(
                 "payments service answered with something other than a list"
