@@ -222,6 +222,49 @@ class Booking(Base):
     )
 
 
+class Group(Base):
+    __tablename__ = "groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    show_id: Mapped[int] = mapped_column(ForeignKey("shows.id"), nullable=False)
+    hold_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    seat_ids: Mapped[list[int]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="PENDING_PAYMENT"
+    )
+    invite_code: Mapped[str] = mapped_column(String(6), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    members: Mapped[list["GroupMember"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uq_group_members_group_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    seat_ids: Mapped[list[int]] = mapped_column(JSON, nullable=False, default=list)
+    share_amount: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=Decimal("0")
+    )
+    payment_status: Mapped[str] = mapped_column(String, nullable=False, default="PENDING")
+    payment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    group: Mapped[Group] = relationship(back_populates="members")
+
+
 class OtpChallenge(Base):
     __tablename__ = "otp_challenges"
 

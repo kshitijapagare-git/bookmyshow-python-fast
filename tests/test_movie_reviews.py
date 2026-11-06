@@ -49,6 +49,7 @@ REVIEW_KEYS = {
     "movieId",
     "userId",
     "bookingId",
+    "groupId",
     "rating",
     "comment",
     "verified",
@@ -365,25 +366,29 @@ class _FakeReviewsService:
         movie_id: int,
         user_id: int,
         booking_id: int | None,
+        group_id: int | None = None,
         rating: int,
         comment: str,
         verified: bool,
     ) -> tuple[dict[str, object], bool]:
-        self.submits.append(
-            {
-                "movie_id": movie_id,
-                "user_id": user_id,
-                "booking_id": booking_id,
-                "rating": rating,
-                "comment": comment,
-                "verified": verified,
-            }
-        )
+        submitted: dict[str, object] = {
+            "movie_id": movie_id,
+            "user_id": user_id,
+            "booking_id": booking_id,
+            "rating": rating,
+            "comment": comment,
+            "verified": verified,
+        }
+        # The client only sends groupId for a group review, so the fake records it
+        # only then; a booking review's submission stays exactly what it was.
+        if group_id is not None:
+            submitted["group_id"] = group_id
+        self.submits.append(submitted)
         if self.outcome == "unavailable":
             raise ReviewsUnavailableError("reviews service answered 500")
         created = (movie_id, user_id) not in self._seen
         self._seen.add((movie_id, user_id))
-        return {
+        body: dict[str, object] = {
             "id": 9,
             "movieId": movie_id,
             "userId": user_id,
@@ -392,7 +397,10 @@ class _FakeReviewsService:
             "comment": comment,
             "verified": verified,
             "createdAt": "2026-10-20T10:00:00+05:30",
-        }, created
+        }
+        if group_id is not None:
+            body["groupId"] = group_id
+        return body, created
 
 
 @contextmanager

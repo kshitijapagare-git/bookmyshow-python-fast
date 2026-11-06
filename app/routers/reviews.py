@@ -4,14 +4,21 @@ from sqlalchemy.orm import Session
 
 from ..bookings import PAYMENTS_UNAVAILABLE_DETAIL
 from ..db import get_db
-from ..models import Booking, Show, User
+from ..groups import find_member
+from ..models import Booking, Group, Show, User
 from ..payments_client import (
     PaymentsClient,
     PaymentsUnavailableError,
     get_payments_client,
 )
 from ..reviews_client import ReviewsClient, ReviewsUnavailableError, get_reviews_client
-from ..schemas import BookingStatus, ReviewOut, ReviewSubmitIn, ReviewsPageOut
+from ..schemas import (
+    BookingStatus,
+    MemberPaymentStatus,
+    ReviewOut,
+    ReviewSubmitIn,
+    ReviewsPageOut,
+)
 from ..security import get_current_user
 
 router = APIRouter(prefix="/api/movies", tags=["reviews"])
@@ -70,34 +77,55 @@ def create_movie_review(
     payments: PaymentsClient = Depends(get_payments_client),
     reviews: ReviewsClient = Depends(get_reviews_client),
 ) -> ReviewOut:
-    """Review a movie, but only against the caller's own confirmed and paid booking."""
-    booking = db.get(Booking, payload.bookingId)
-    if (
-        booking is None
-        or booking.user_id != user.id
-        or booking.status != BookingStatus.CONFIRMED.value
-    ):
-        raise _review_forbidden()
+    """Review a movie, against the caller's own paid booking or their paid group share."""
+    if payload.groupId is not None:
+        group = db.get(Group, payload.groupId)
+        if group is None:
+            raise _review_forbidden()
+        member = find_member(db=db, group_id=group.id, user_id=user.id)
+        if (
+            member is None
+            or member.payment_status != MemberPaymentStatus.PAID.value
+            or group.status != BookingStatus.CONFIRMED.value
+        ):
+            raise _review_forbidden()
 
-    booked_movie_id = db.scalar(select(Show.movie_id).where(Show.id == booking.show_id))
-    if booked_movie_id != movie_id:
-        raise _review_forbidden()
+        group_movie_id = db.scalar(
+            select(Show.movie_id).where(Show.id == group.show_id)
+        )
+        if group_movie_id != movie_id:
+            raise _review_forbidden()
+    else:
+        booking = db.get(Booking, payload.bookingId)
+        if (
+            booking is None
+            or booking.user_id != user.id
+            or booking.status != BookingStatus.CONFIRMED.value
+        ):
+            raise _review_forbidden()
 
-    try:
-        paid_rows = payments.list_payments(booking_id=payload.bookingId)
-    except PaymentsUnavailableError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=PAYMENTS_UNAVAILABLE_DETAIL,
-        ) from None
-    if not any(row.get("status") == PAID_PAYMENT_STATUS for row in paid_rows):
-        raise _review_forbidden()
+        booked_movie_id = db.scalar(
+            select(Show.movie_id).where(Show.id == booking.show_id)
+        )
+        if booked_movie_id != movie_id:
+            raise _review_forbidden()
+
+        try:
+            paid_rows = payments.list_payments(booking_id=payload.bookingId)
+        except PaymentsUnavailableError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=PAYMENTS_UNAVAILABLE_DETAIL,
+            ) from None
+        if not any(row.get("status") == PAID_PAYMENT_STATUS for row in paid_rows):
+            raise _review_forbidden()
 
     try:
         body, created = reviews.create_review(
             movie_id=movie_id,
             user_id=user.id,
             booking_id=payload.bookingId,
+            group_id=payload.groupId,
             rating=payload.rating,
             comment=payload.comment,
             verified=True,
