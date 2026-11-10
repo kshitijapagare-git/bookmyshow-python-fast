@@ -19,10 +19,13 @@ from .routers import (
     crypto,
     groups,
     holds,
+    internal_bookings,
     movies,
     reviews,
     seats,
     shows,
+    transfers,
+    users,
 )
 from .seating import HOLD_SWEEP_INTERVAL_SECONDS, release_expired_holds
 from seed import seed_data
@@ -81,8 +84,11 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.include_router(seats.router)
     application.include_router(auth.router)
     application.include_router(auth.me_router)
+    application.include_router(users.router)
     application.include_router(holds.router)
     application.include_router(bookings.router)
+    application.include_router(internal_bookings.router)
+    application.include_router(transfers.router)
     application.include_router(groups.router)
     application.include_router(crypto.router)
     return application

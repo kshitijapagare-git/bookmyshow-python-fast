@@ -10,7 +10,7 @@ from ..bookings import (
     quote_hold,
 )
 from ..db import get_db
-from ..models import Booking, Seat, ShowSeat, User
+from ..models import Booking, BookingTransfer, Seat, ShowSeat, User
 from ..payments_client import PaymentsClient, get_payments_client
 from ..schemas import (
     BookingCancelOut,
@@ -23,11 +23,16 @@ from ..schemas import (
 )
 from ..security import get_current_user
 from ..seating import seat_label
+from ..transfers import current_transfer, transfer_out
 
 router = APIRouter(prefix="/api", tags=["bookings"])
 
 
-def _booking_out(booking: Booking, seats: list[HeldSeatOut]) -> BookingOut:
+def _booking_out(
+    booking: Booking,
+    seats: list[HeldSeatOut],
+    transfer: BookingTransfer | None = None,
+) -> BookingOut:
     return BookingOut(
         bookingId=booking.id,
         showId=booking.show_id,
@@ -45,6 +50,7 @@ def _booking_out(booking: Booking, seats: list[HeldSeatOut]) -> BookingOut:
             else None
         ),
         discount=float(booking.discount) if booking.discount is not None else None,
+        transfer=transfer_out(transfer) if transfer is not None else None,
     )
 
 
@@ -94,7 +100,8 @@ def read_booking(
     db: Session = Depends(get_db),
 ) -> BookingOut:
     booking = get_booking(db=db, booking_id=booking_id, user=user)
-    return _booking_out(booking, _seats_out(db, booking.seat_ids))
+    transfer = current_transfer(db=db, booking_id=booking.id)
+    return _booking_out(booking, _seats_out(db, booking.seat_ids), transfer)
 
 
 @router.post(

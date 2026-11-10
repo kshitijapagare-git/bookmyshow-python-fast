@@ -246,6 +246,43 @@ class Group(Base):
     )
 
 
+class BookingTransfer(Base):
+    __tablename__ = "booking_transfers"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING','ACCEPTED','CANCELLED','EXPIRED')",
+            name="ck_booking_transfers_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    booking_id: Mapped[int] = mapped_column(
+        ForeignKey("bookings.id"), nullable=False, index=True
+    )
+    from_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    to_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    code: Mapped[str] = mapped_column(String(6), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="PENDING")
+    fee: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=Decimal("0.00")
+    )
+    payments_transfer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancelled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class GroupMember(Base):
     __tablename__ = "group_members"
     __table_args__ = (

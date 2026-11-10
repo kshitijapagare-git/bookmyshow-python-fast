@@ -282,6 +282,109 @@ class PaymentsClient:
                 "payments service answered with a non-JSON body"
             ) from None
 
+    def settle_transfer(
+        self,
+        *,
+        booking_id: int,
+        from_user_id: int,
+        to_user_id: int,
+        amount: Decimal,
+        fee: Decimal,
+    ) -> dict[str, object]:
+        """Settle a ticket transfer; `transfer:{booking_id}` makes a retry free."""
+        url = f"{self.settings.base_url}/internal/transfers"
+        payload: dict[str, object] = {
+            "bookingId": booking_id,
+            "fromUserId": from_user_id,
+            "toUserId": to_user_id,
+            "amount": float(amount),
+            "fee": float(fee),
+        }
+        headers = {
+            "X-Service-Token": self.settings.service_token,
+            "Idempotency-Key": f"transfer:{booking_id}",
+        }
+
+        last_error = "payments service did not answer"
+        for attempt in range(1, ATTEMPTS + 1):
+            try:
+                response = httpx.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.settings.timeout_seconds,
+                )
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "payments service transfer transport error on attempt %s: %s",
+                    attempt,
+                    exc,
+                )
+                last_error = str(exc)
+                continue
+
+            if response.status_code == status.HTTP_402_PAYMENT_REQUIRED:
+                # A refused charge is a business answer, so it is never retried.
+                raise PaymentDeclinedError(DECLINE_DETAIL)
+
+            if response.status_code >= 500:
+                logger.warning(
+                    "payments service answered %s to the transfer on attempt %s",
+                    response.status_code,
+                    attempt,
+                )
+                last_error = f"payments service answered {response.status_code}"
+                continue
+
+            if not 200 <= response.status_code < 300:
+                raise PaymentsUnavailableError(
+                    f"payments service answered {response.status_code}"
+                )
+
+            try:
+                body = response.json()
+            except ValueError:
+                raise PaymentsUnavailableError(
+                    "payments service answered with a non-JSON body"
+                ) from None
+            if not isinstance(body, dict):
+                raise PaymentsUnavailableError(
+                    "payments service answered with something other than an object"
+                )
+            return body
+
+        raise PaymentsUnavailableError(last_error)
+
+    def release_transfer(self, *, transfer_id: int) -> dict[str, object]:
+        """Release a settled transfer; every failure raises so the offer stays pending."""
+        url = f"{self.settings.base_url}/internal/transfers/{transfer_id}/cancel"
+        headers = {"X-Service-Token": self.settings.service_token}
+
+        try:
+            response = httpx.post(
+                url, headers=headers, timeout=self.settings.timeout_seconds
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("payments service transfer release error: %s", exc)
+            raise PaymentsUnavailableError(str(exc)) from None
+
+        if not 200 <= response.status_code < 300:
+            raise PaymentsUnavailableError(
+                f"payments service answered {response.status_code}"
+            )
+
+        try:
+            body = response.json()
+        except ValueError:
+            raise PaymentsUnavailableError(
+                "payments service answered with a non-JSON body"
+            ) from None
+        if not isinstance(body, dict):
+            raise PaymentsUnavailableError(
+                "payments service answered with something other than an object"
+            )
+        return body
+
     def list_payments(self, *, booking_id: int) -> list[dict[str, object]]:
         """Every payment recorded for a booking, newest first; none reads as `[]`."""
         url = f"{self.settings.base_url}/internal/payments?bookingId={booking_id}"
