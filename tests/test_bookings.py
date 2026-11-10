@@ -271,8 +271,10 @@ def test_booking_success_confirms_and_sells_seats(client) -> None:
         "promoCode",
         "originalAmount",
         "discount",
+        "transfer",
     }
     assert body["status"] == "CONFIRMED"
+    assert body["transfer"] is None
     assert body["showId"] == show_id
     assert body["holdId"] == hold_id
     assert body["paymentId"] == PAYMENT_ID

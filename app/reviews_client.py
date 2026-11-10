@@ -120,6 +120,66 @@ class ReviewsClient:
 
         raise ReviewsUnavailableError(last_error)
 
+    def list_booking_reviews(
+        self, *, movie_id: int, booking_id: int
+    ) -> list[dict[str, object]]:
+        """Every review already stored for one booking, transferred ones included."""
+        url = (
+            f"{self.settings.base_url}/internal/reviews"
+            f"?movieId={movie_id}&bookingId={booking_id}"
+        )
+        headers = {"X-Service-Token": self.settings.service_token}
+
+        try:
+            response = httpx.get(
+                url, headers=headers, timeout=self.settings.timeout_seconds
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("reviews service booking lookup error: %s", exc)
+            raise ReviewsUnavailableError(str(exc)) from None
+
+        if not 200 <= response.status_code < 300:
+            raise ReviewsUnavailableError(
+                f"reviews service answered {response.status_code}"
+            )
+
+        rows = _as_object(_body(response)).get("reviews")
+        if not isinstance(rows, list):
+            raise ReviewsUnavailableError(
+                "reviews service answered without a reviews list"
+            )
+        reviews: list[dict[str, object]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ReviewsUnavailableError(
+                    "reviews service answered with a review that is not an object"
+                )
+            reviews.append(row)
+        return reviews
+
+    def transfer_review(self, *, review_id: int) -> dict[str, object]:
+        """Mark a review TRANSFERRED; an unknown review simply has nothing to mark."""
+        url = f"{self.settings.base_url}/internal/reviews/{review_id}/transfer"
+        headers = {"X-Service-Token": self.settings.service_token}
+
+        try:
+            response = httpx.post(
+                url, headers=headers, timeout=self.settings.timeout_seconds
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("reviews service transfer error: %s", exc)
+            raise ReviewsUnavailableError(str(exc)) from None
+
+        if response.status_code == 404:
+            return {}
+
+        if not 200 <= response.status_code < 300:
+            raise ReviewsUnavailableError(
+                f"reviews service answered {response.status_code}"
+            )
+
+        return _as_object(_body(response))
+
     def create_review(
         self,
         *,

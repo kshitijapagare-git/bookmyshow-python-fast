@@ -212,7 +212,8 @@ def test_group_status_vocabulary_never_carries_an_expired_value(client) -> None:
         "CANCELLED",
     }
     assert "EXPIRED" not in {status.name for status in BookingStatus}
-    assert "EXPIRED" not in SCHEMAS_SOURCE
+    booking_status_block = SCHEMAS_SOURCE.split("class BookingStatus")[1]
+    assert "EXPIRED" not in booking_status_block.split("class ")[0]
 
     user_id = _create_user("+919000001003")
     _, _, hold = _create_hold(client, user_id, 1)

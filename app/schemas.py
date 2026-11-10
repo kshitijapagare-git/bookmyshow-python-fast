@@ -324,6 +324,40 @@ class BookingQuoteOut(BaseModel):
     promoCode: str
 
 
+class TransferStatus(str, Enum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+
+
+class BookingTransferIn(BaseModel):
+    toUserId: int = Field(gt=0)
+
+
+class BookingTransferOut(BaseModel):
+    transferId: int
+    transferCode: str
+    bookingId: int
+    fromUserId: int
+    toUserId: int
+    status: TransferStatus
+    fee: float
+    createdAt: datetime
+    expiresAt: datetime
+
+
+class TransferDetailOut(BaseModel):
+    transfer: BookingTransferOut
+    bookingId: int
+    movieId: int
+    movieTitle: str
+    cinemaName: str
+    showStartsAt: datetime
+    seats: list[HeldSeatOut]
+    reviewEligible: bool
+
+
 class BookingOut(BaseModel):
     bookingId: int
     showId: int
@@ -337,12 +371,24 @@ class BookingOut(BaseModel):
     promoCode: str | None = None
     originalAmount: float | None = None
     discount: float | None = None
+    transfer: BookingTransferOut | None = None
 
 
 class BookingCancelOut(BaseModel):
     id: int
     status: BookingStatus
     refundedAt: datetime | None = None
+
+
+class InternalBookingOut(BaseModel):
+    """A booking's current owner, as the ratings service reads it before a review."""
+
+    bookingId: int
+    userId: int
+    status: BookingStatus
+    showId: int
+    showStartsAt: datetime
+    movieId: int
 
 
 class MemberPaymentStatus(str, Enum):
@@ -394,6 +440,7 @@ class ReviewOut(BaseModel):
     rating: int = Field(ge=1, le=5)
     comment: str = Field(default="", max_length=1000)
     verified: bool = False
+    status: str = "ACTIVE"
     createdAt: datetime
 
 

@@ -3,6 +3,7 @@ import os
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
 import bcrypt
 import jwt
@@ -25,6 +26,10 @@ if OTP_DEV_FIXED_CODE:
     logger.warning("OTP_DEV_FIXED_CODE is set: every OTP uses the fixed development code")
 
 UNAUTHORIZED_DETAIL = "Unauthorized"
+BOOKINGS_SERVICE_TOKEN = os.getenv(
+    "BOOKINGS_SERVICE_TOKEN", "dev-service-token"
+).strip()
+INVALID_SERVICE_TOKEN_DETAIL = "Invalid service token"
 
 
 def _unauthorized() -> HTTPException:
@@ -107,3 +112,15 @@ def get_optional_user(
         return None
 
     return db.get(User, user_id)
+
+
+def require_service_token(
+    x_service_token: Annotated[str | None, Header(alias="X-Service-Token")] = None,
+) -> None:
+    """The shared token the other services present; a missing or wrong one is a 401."""
+    presented = (x_service_token or "").strip()
+    if not presented or not secrets.compare_digest(presented, BOOKINGS_SERVICE_TOKEN):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=INVALID_SERVICE_TOKEN_DETAIL,
+        )

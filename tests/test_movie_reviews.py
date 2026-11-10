@@ -53,6 +53,7 @@ REVIEW_KEYS = {
     "rating",
     "comment",
     "verified",
+    "status",
     "createdAt",
 }
 BOOKINGS_URL = "/api/bookings"
