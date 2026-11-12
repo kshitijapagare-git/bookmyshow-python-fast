@@ -8,3 +8,4 @@ bcrypt>=4.2
 PyJWT>=2.9
 cryptography>=43
 confluent-kafka>=2.6
+pika>=1.3

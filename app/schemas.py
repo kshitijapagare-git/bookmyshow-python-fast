@@ -487,3 +487,9 @@ class EventPublishOut(BaseModel):
     topic: str
     partition: int
     offset: int
+
+
+class RabbitPublishOut(BaseModel):
+    eventId: str
+    exchange: str
+    routingKey: str
