@@ -299,3 +299,49 @@ def test_the_internal_token_is_required(client, token: str | None) -> None:
     assert body["instance"] == _url()
     assert _assets() == []
     assert _stored_files() == before
+
+
+def test_the_card_and_detail_poster_url_is_the_current_poster(client) -> None:
+    first = _upload(client, MOVIE_ID, "POSTER", POSTER_PAYLOAD, "image/png")
+    second = _upload(client, MOVIE_ID, "POSTER", SECOND_POSTER_PAYLOAD, "image/png")
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    current_url = second.json()["url"]
+    assert current_url != first.json()["url"]
+
+    detail = client.get(f"/api/movies/{MOVIE_ID}")
+
+    assert detail.status_code == 200
+    assert detail.json()["posterUrl"] == current_url
+
+    listed = client.get("/api/movies")
+
+    assert listed.status_code == 200
+    by_id = {movie["id"]: movie for movie in listed.json()}
+    assert by_id[MOVIE_ID]["posterUrl"] == current_url
+
+    # The url both catalogue endpoints hand out really serves the current bytes.
+    fetched = client.get(current_url)
+    assert fetched.status_code == 200
+    assert fetched.content == SECOND_POSTER_PAYLOAD
+
+
+def test_the_detail_backdrop_url_is_the_current_backdrop(client) -> None:
+    second_payload = b"\xff\xd8\xff\xe0second-backdrop-bytes"
+    first = _upload(client, MOVIE_ID, "BACKDROP", BACKDROP_PAYLOAD, "image/jpeg")
+    second = _upload(client, MOVIE_ID, "BACKDROP", second_payload, "image/jpeg")
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    current_url = second.json()["url"]
+    assert current_url != first.json()["url"]
+
+    detail = client.get(f"/api/movies/{MOVIE_ID}")
+
+    assert detail.status_code == 200
+    assert detail.json()["backdropUrl"] == current_url
+
+    fetched = client.get(current_url)
+    assert fetched.status_code == 200
+    assert fetched.content == second_payload

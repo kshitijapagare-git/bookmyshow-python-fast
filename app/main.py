@@ -35,6 +35,7 @@ from .routers import (
     groups,
     holds,
     internal_bookings,
+    media,
     movies,
     reviews,
     seats,
@@ -156,6 +157,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.include_router(cities.router)
     application.include_router(cinemas.router)
     application.include_router(movies.router)
+    application.include_router(media.router)
     application.include_router(reviews.router)
     application.include_router(shows.router)
     application.include_router(seats.router)

@@ -160,6 +160,10 @@ class StorageBackend(Protocol):
         """Where this key lives on local disk, for the backends that have a disk."""
         ...
 
+    def resolve(self, key: str) -> Path | None:
+        """The file this key was stored as, or None when the bytes are not there."""
+        ...
+
 
 class LocalStorageBackend:
     """Streams uploads onto local disk, content-addressed by their SHA-256."""
@@ -174,6 +178,18 @@ class LocalStorageBackend:
     def public_url(self, key: str) -> str:
         """`/media/{key}`, served by the static mount `create_app` installs."""
         return f"{MEDIA_URL_PREFIX}/{key}"
+
+    def resolve(self, key: str) -> Path | None:
+        """The stored file for this key, or None when it is gone or escapes the root.
+
+        A `storage_key` that resolves outside `MEDIA_UPLOAD_DIR` is treated exactly
+        like a missing file, so a tampered row can never serve a path of its choosing.
+        """
+        root = Path(self.settings.upload_dir).resolve()
+        candidate = self.path_for(key).resolve()
+        if not candidate.is_relative_to(root) or not candidate.is_file():
+            return None
+        return candidate
 
     async def save(
         self,
