@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..delivery import DeliveryPolicy, EventDeliveryService, get_delivery_policy
+from ..event_bus import EventBus, EventEnvelope, get_event_bus
 from ..kafka_consumer import get_consumer_status
 from ..kafka_producer import DeliveryResult, EventPublisher, get_event_publisher
 from ..models import EventDelivery
@@ -18,8 +19,13 @@ from ..rabbit_publisher import (
 )
 from ..schemas import (
     DeliveryStatusOut,
+    EventBusHandlerErrorOut,
+    EventBusPublishIn,
+    EventBusPublishOut,
+    EventBusSubscriptionOut,
     EventPublishIn,
     EventPublishOut,
+    EventSubscriptionsOut,
     KafkaConsumerStatusOut,
     RabbitPublishOut,
 )
@@ -114,4 +120,47 @@ def get_kafka_consumer_status(request: Request) -> KafkaConsumerStatusOut:
         processedCount=current.processed_count,
         lastEventAt=current.last_event_at,
         lastError=current.last_error,
+    )
+
+
+@router.post("", response_model=EventBusPublishOut, status_code=status.HTTP_202_ACCEPTED)
+def publish_bus_event(
+    payload: EventBusPublishIn,
+    bus: EventBus = Depends(get_event_bus),
+) -> EventBusPublishOut:
+    """Publish straight through the selected transport; a failed handler is reported, not raised."""
+    outcome = bus.publish(
+        EventEnvelope(
+            type=payload.type,
+            version=payload.version,
+            payload=payload.payload,
+            metadata=payload.metadata,
+        )
+    )
+    return EventBusPublishOut(
+        id=outcome.event_id,
+        handlerErrors=[
+            EventBusHandlerErrorOut(
+                eventType=error.event_type,
+                handler=error.handler,
+                error=error.error,
+            )
+            for error in outcome.handler_errors
+        ],
+    )
+
+
+@router.get("/subscriptions", response_model=EventSubscriptionsOut)
+def list_event_subscriptions(
+    bus: EventBus = Depends(get_event_bus),
+) -> EventSubscriptionsOut:
+    """Every in-process subscription the bus holds, and the transport it publishes on."""
+    return EventSubscriptionsOut(
+        transport=bus.transport,
+        subscriptions=[
+            EventBusSubscriptionOut(
+                eventType=subscription.event_type, handler=subscription.name
+            )
+            for subscription in bus.subscriptions()
+        ],
     )
