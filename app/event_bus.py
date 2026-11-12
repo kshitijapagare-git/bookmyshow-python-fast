@@ -36,6 +36,7 @@ from fastapi import Request
 from pydantic import BaseModel, Field, StringConstraints
 
 from .delivery import _error_text
+from .event_metrics import EventMetrics, log_event
 from .kafka_producer import KafkaUnavailableError
 from .rabbit_publisher import RabbitUnavailableError
 
@@ -149,8 +150,10 @@ class EventBus:
         transport: EventBusTransport,
         kafka_publisher: object | None = None,
         rabbit_publisher: object | None = None,
+        metrics: EventMetrics | None = None,
     ) -> None:
         self._transport = transport
+        self.metrics = metrics
         self._kafka_publisher = kafka_publisher
         self._rabbit_publisher = rabbit_publisher
         self._subscriptions: dict[str, list[Handler]] = {}
@@ -187,9 +190,31 @@ class EventBus:
 
     def publish(self, event: EventEnvelope) -> PublishResult:
         """Send the envelope through the transport, then run its subscribers."""
-        self._send(event)
+        try:
+            self._send(event)
+        except Exception:
+            # The transport refused it, so the caller sees the error and nothing ran.
+            self._count_failure(event.type)
+            raise
+        self._count_published(event.type)
         errors = self._dispatch(event)
+        for _ in errors:
+            self._count_failure(event.type)
         return PublishResult(event_id=event.id, handler_errors=errors)
+
+    def _count_published(self, event_type: str) -> None:
+        """Count one event the transport accepted; no-op without a registry."""
+        if self.metrics is not None:
+            self.metrics.record_published(
+                event_type=event_type, transport=self._transport
+            )
+
+    def _count_failure(self, event_type: str) -> None:
+        """Count one event the transport refused or a subscriber raised on."""
+        if self.metrics is not None:
+            self.metrics.record_failed(
+                event_type=event_type, transport=self._transport
+            )
 
     def _send(self, event: EventEnvelope) -> None:
         """Hand the envelope to the selected transport; memory touches no broker."""
@@ -221,20 +246,24 @@ class EventBus:
                 event_id=event.id,
             )
         except Exception as error:
-            logger.warning(
-                "event bus publish failed eventId=%s type=%s transport=%s: %s",
-                event.id,
-                event.type,
-                transport,
-                _error_text(error),
+            log_event(
+                logger,
+                logging.WARNING,
+                "event bus publish failed",
+                event_id=event.id,
+                event_type=event.type,
+                transport=transport,
+                detail=_error_text(error),
             )
             raise
 
-        logger.info(
-            "event bus published eventId=%s type=%s transport=%s",
-            event.id,
-            event.type,
-            transport,
+        log_event(
+            logger,
+            logging.INFO,
+            "event bus published",
+            event_id=event.id,
+            event_type=event.type,
+            transport=transport,
         )
 
     def _dispatch(self, event: EventEnvelope) -> tuple[HandlerError, ...]:
@@ -253,14 +282,14 @@ class EventBus:
                 errors.append(
                     HandlerError(event_type=event.type, handler=name, error=text)
                 )
-                logger.warning(
-                    "event bus handler failed eventId=%s type=%s handler=%s "
-                    "transport=%s error=%s",
-                    event.id,
-                    event.type,
-                    name,
-                    self._transport,
-                    text,
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "event bus handler failed",
+                    event_id=event.id,
+                    event_type=event.type,
+                    transport=self._transport,
+                    detail=f"handler={name} error={text}",
                 )
         return tuple(errors)
 
@@ -270,12 +299,14 @@ def build_event_bus(
     settings: EventBusSettings,
     kafka_publisher: object | None = None,
     rabbit_publisher: object | None = None,
+    metrics: EventMetrics | None = None,
 ) -> EventBus:
     """The bus for these settings; a missing broker client is bound later, never fatal."""
     return EventBus(
         transport=settings.transport,
         kafka_publisher=kafka_publisher,
         rabbit_publisher=rabbit_publisher,
+        metrics=metrics,
     )
 
 

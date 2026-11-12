@@ -553,3 +553,47 @@ class EventSubscriptionsOut(BaseModel):
 
     transport: EventBusTransport
     subscriptions: list[EventBusSubscriptionOut]
+
+
+class EventMetricsBucketOut(BaseModel):
+    """One (event type, transport) pair's five counters, as `/metrics` reports them."""
+
+    type: str
+    transport: str
+    published: int
+    consumed: int
+    failed: int
+    retried: int
+    deadLettered: int
+
+
+class EventMetricsOut(BaseModel):
+    """The process's event counters plus when any of them last moved."""
+
+    counters: list[EventMetricsBucketOut] = Field(default_factory=list)
+    lastEventAt: datetime | None = None
+
+
+class EventHealthOut(BaseModel):
+    """The three components `/health` reports, each "up" or "down"."""
+
+    fastapi: str
+    kafka: str
+    rabbitmq: str
+
+
+class EventLogEntryOut(BaseModel):
+    """One recent delivery summary: the ticket's five fields, so no payload is exposed."""
+
+    eventId: str
+    type: str
+    transport: str
+    status: str
+    timestamp: datetime
+
+
+class EventLogOut(BaseModel):
+    """The recent delivery summaries, newest first, and the limit that produced them."""
+
+    entries: list[EventLogEntryOut] = Field(default_factory=list)
+    limit: int
