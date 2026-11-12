@@ -10,6 +10,12 @@ from .crypto.sessions import SessionStore
 from .db import Base, SessionLocal, engine
 from .delivery import DeliveryPolicy
 from .errors import register_error_handlers
+from .kafka_consumer import (
+    HandlerRegistry,
+    KafkaConsumerSettings,
+    KafkaConsumerState,
+    build_kafka_event_consumer,
+)
 from .kafka_producer import KafkaSettings, build_event_publisher
 from .payments_client import PaymentsSettings
 from .rabbit_publisher import RabbitSettings, build_rabbit_publisher
@@ -53,8 +59,21 @@ async def _sweep_expired_holds() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    # Consumer state is per process lifetime, so a fresh lifespan starts from the
+    # documented initial counters rather than whatever a previous run left behind.
+    _app.state.kafka_consumer_state = KafkaConsumerState()
     _app.state.event_publisher = build_event_publisher(_app.state.kafka_settings)
     _app.state.rabbit_publisher = build_rabbit_publisher(_app.state.rabbit_settings)
+    _app.state.event_consumer = build_kafka_event_consumer(
+        settings=_app.state.kafka_settings,
+        consumer_settings=_app.state.kafka_consumer_settings,
+        registry=_app.state.event_consumer_registry,
+        publisher=_app.state.event_publisher,
+        policy=_app.state.delivery_policy,
+        state=_app.state.kafka_consumer_state,
+    )
+    if _app.state.event_consumer is not None:
+        _app.state.event_consumer.start()
     sweeper = asyncio.create_task(_sweep_expired_holds())
     try:
         yield
@@ -62,6 +81,8 @@ async def lifespan(_app: FastAPI):
         sweeper.cancel()
         with suppress(asyncio.CancelledError):
             await sweeper
+        if _app.state.event_consumer is not None:
+            _app.state.event_consumer.stop()
         if _app.state.event_publisher is not None:
             _app.state.event_publisher.close()
         if _app.state.rabbit_publisher is not None:
@@ -77,6 +98,10 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.state.payments_settings = PaymentsSettings.from_env()
     application.state.reviews_settings = ReviewsSettings.from_env()
     application.state.kafka_settings = KafkaSettings.from_env()
+    application.state.kafka_consumer_settings = KafkaConsumerSettings.from_env()
+    application.state.kafka_consumer_state = KafkaConsumerState()
+    application.state.event_consumer_registry = HandlerRegistry()
+    application.state.event_consumer = None
     application.state.rabbit_settings = RabbitSettings.from_env()
     application.state.delivery_policy = DeliveryPolicy.from_env()
 

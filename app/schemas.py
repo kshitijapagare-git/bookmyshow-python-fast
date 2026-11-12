@@ -502,3 +502,14 @@ class DeliveryStatusOut(BaseModel):
     attempts: int
     lastError: str | None
     nextRetryAt: datetime | None
+
+
+class KafkaConsumerStatusOut(BaseModel):
+    """This process's Kafka consumer, as `GET /api/events/kafka/status` reports it."""
+
+    running: bool
+    topic: str
+    group: str
+    processedCount: int
+    lastEventAt: datetime | None
+    lastError: str | None
