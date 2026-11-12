@@ -181,9 +181,10 @@ class RabbitPublisher:
         payload: dict[str, object],
         version: int = 1,
         key: str | None = None,
+        event_id: str | None = None,
     ) -> RabbitDeliveryResult:
         """Publish one persistent event, raising RabbitUnavailableError on any failure."""
-        event_id = str(uuid.uuid4())
+        event_id = event_id if event_id is not None else str(uuid.uuid4())
         envelope = build_envelope(
             event_id=event_id,
             event_type=event_type,
@@ -234,6 +235,84 @@ class RabbitPublisher:
             event_type,
             self.settings.exchange,
             routing_key,
+        )
+        return RabbitDeliveryResult(
+            event_id=event_id,
+            exchange=self.settings.exchange,
+            routing_key=routing_key,
+        )
+
+    def dead_letter_routing_key(self, event_type: str) -> str:
+        """`{routing_key}.dlq`: the producer-side contract for the dead-letter route."""
+        return f"{self.settings.routing_key_for(event_type)}.dlq"
+
+    def publish_dead_letter(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        version: int = 1,
+        key: str | None = None,
+        attempts: int,
+        last_error: str,
+    ) -> RabbitDeliveryResult:
+        """Park one event on the `.dlq` route, reusing the eventId every attempt carried."""
+        envelope = build_envelope(
+            event_id=event_id,
+            event_type=event_type,
+            version=version,
+            occurred_at=datetime.now(timezone.utc),
+            payload=payload,
+            key=key,
+        )
+        routing_key = self.dead_letter_routing_key(event_type)
+        properties = RabbitMessageProperties(
+            delivery_mode=PERSISTENT_DELIVERY_MODE,
+            message_id=event_id,
+            headers={
+                "eventId": event_id,
+                "type": event_type,
+                "correlationId": key if key is not None else event_id,
+                "attempts": str(attempts),
+                "lastError": last_error,
+            },
+            content_type=CONTENT_TYPE,
+        )
+        body = json.dumps(envelope).encode("utf-8")
+
+        with self._lock:
+            try:
+                channel = self._open_channel()
+                self._ensure_exchange(channel)
+                channel.basic_publish(
+                    exchange=self.settings.exchange,
+                    routing_key=routing_key,
+                    body=body,
+                    properties=properties,
+                )
+            except Exception as exc:  # pika's own error types are a lazy import
+                logger.warning(
+                    "dead-letter publish failed eventId=%s type=%s exchange=%s "
+                    "routingKey=%s attempts=%s: %s",
+                    event_id,
+                    event_type,
+                    self.settings.exchange,
+                    routing_key,
+                    attempts,
+                    exc,
+                )
+                self._reset()
+                raise RabbitUnavailableError() from None
+
+        logger.info(
+            "event dead-lettered eventId=%s type=%s exchange=%s routingKey=%s "
+            "attempts=%s",
+            event_id,
+            event_type,
+            self.settings.exchange,
+            routing_key,
+            attempts,
         )
         return RabbitDeliveryResult(
             event_id=event_id,

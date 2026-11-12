@@ -8,6 +8,7 @@ from .crypto.keys import load_key_pair
 from .crypto.middleware import CryptoMiddleware
 from .crypto.sessions import SessionStore
 from .db import Base, SessionLocal, engine
+from .delivery import DeliveryPolicy
 from .errors import register_error_handlers
 from .kafka_producer import KafkaSettings, build_event_publisher
 from .payments_client import PaymentsSettings
@@ -77,6 +78,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.state.reviews_settings = ReviewsSettings.from_env()
     application.state.kafka_settings = KafkaSettings.from_env()
     application.state.rabbit_settings = RabbitSettings.from_env()
+    application.state.delivery_policy = DeliveryPolicy.from_env()
 
     if resolved.enabled:
         application.add_middleware(

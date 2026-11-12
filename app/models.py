@@ -327,3 +327,42 @@ class OtpRequest(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+
+
+class EventDelivery(Base):
+    """One published event's delivery state, keyed by the eventId every attempt carried."""
+
+    __tablename__ = "event_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING','RETRYING','DELIVERED','DEAD_LETTERED')",
+            name="ck_event_deliveries_status",
+        ),
+        CheckConstraint(
+            "transport IN ('KAFKA','RABBIT')",
+            name="ck_event_deliveries_transport",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, unique=True, index=True
+    )
+    transport: Mapped[str] = mapped_column(String, nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="PENDING")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )

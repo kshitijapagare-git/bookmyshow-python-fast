@@ -116,11 +116,15 @@ class _FakeRabbitPublisher:
         exchange: str = "bookmyshow.events",
         routing_key: str = "bookmyshow.booking.confirmed",
         outcome: str = "succeed",
+        dead_letter_outcome: str = "fail",
     ) -> None:
         self.exchange = exchange
         self.routing_key = routing_key
         self.outcome = outcome
+        self.dead_letter_outcome = dead_letter_outcome
         self.calls: list[dict[str, object]] = []
+        self.event_ids: list[str | None] = []
+        self.dead_letters: list[dict[str, object]] = []
 
     def publish(
         self,
@@ -129,6 +133,7 @@ class _FakeRabbitPublisher:
         payload: dict[str, object],
         version: int = 1,
         key: str | None = None,
+        event_id: str | None = None,
     ) -> RabbitDeliveryResult:
         self.calls.append(
             {
@@ -138,12 +143,44 @@ class _FakeRabbitPublisher:
                 "key": key,
             }
         )
+        self.event_ids.append(event_id)
         if self.outcome == "unavailable":
             raise RabbitUnavailableError()
         return RabbitDeliveryResult(
-            event_id=str(uuid.uuid4()),
+            event_id=event_id if event_id is not None else str(uuid.uuid4()),
             exchange=self.exchange,
             routing_key=self.routing_key,
+        )
+
+    def publish_dead_letter(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        version: int = 1,
+        key: str | None = None,
+        attempts: int,
+        last_error: str,
+    ) -> RabbitDeliveryResult:
+        """Record the dead-letter write; only a `succeed` double actually parks it."""
+        self.dead_letters.append(
+            {
+                "event_id": event_id,
+                "event_type": event_type,
+                "payload": payload,
+                "version": version,
+                "key": key,
+                "attempts": attempts,
+                "last_error": last_error,
+            }
+        )
+        if self.dead_letter_outcome == "fail":
+            raise RabbitUnavailableError()
+        return RabbitDeliveryResult(
+            event_id=event_id,
+            exchange=self.exchange,
+            routing_key=f"{self.routing_key}.dlq",
         )
 
 
