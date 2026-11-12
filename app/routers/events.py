@@ -3,7 +3,12 @@
 from fastapi import APIRouter, Depends, status
 
 from ..kafka_producer import DeliveryResult, EventPublisher, get_event_publisher
-from ..schemas import EventPublishIn, EventPublishOut
+from ..rabbit_publisher import (
+    RabbitDeliveryResult,
+    RabbitPublisher,
+    get_rabbit_publisher,
+)
+from ..schemas import EventPublishIn, EventPublishOut, RabbitPublishOut
 from ..security import require_service_token
 
 router = APIRouter(
@@ -32,4 +37,25 @@ def publish_kafka_event(
         topic=result.topic,
         partition=result.partition,
         offset=result.offset,
+    )
+
+
+@router.post(
+    "/rabbit", response_model=RabbitPublishOut, status_code=status.HTTP_202_ACCEPTED
+)
+def publish_rabbit_event(
+    payload: EventPublishIn,
+    publisher: RabbitPublisher = Depends(get_rabbit_publisher),
+) -> RabbitPublishOut:
+    """Publish the envelope in one attempt; a 503 means the broker let us down."""
+    result: RabbitDeliveryResult = publisher.publish(
+        event_type=payload.type,
+        payload=payload.payload,
+        version=payload.version,
+        key=payload.key,
+    )
+    return RabbitPublishOut(
+        eventId=result.event_id,
+        exchange=result.exchange,
+        routingKey=result.routing_key,
     )

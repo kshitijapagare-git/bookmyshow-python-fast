@@ -11,6 +11,7 @@ from .db import Base, SessionLocal, engine
 from .errors import register_error_handlers
 from .kafka_producer import KafkaSettings, build_event_publisher
 from .payments_client import PaymentsSettings
+from .rabbit_publisher import RabbitSettings, build_rabbit_publisher
 from .reviews_client import ReviewsSettings
 from .routers import (
     auth,
@@ -52,6 +53,7 @@ async def _sweep_expired_holds() -> None:
 async def lifespan(_app: FastAPI):
     init_db()
     _app.state.event_publisher = build_event_publisher(_app.state.kafka_settings)
+    _app.state.rabbit_publisher = build_rabbit_publisher(_app.state.rabbit_settings)
     sweeper = asyncio.create_task(_sweep_expired_holds())
     try:
         yield
@@ -61,6 +63,8 @@ async def lifespan(_app: FastAPI):
             await sweeper
         if _app.state.event_publisher is not None:
             _app.state.event_publisher.close()
+        if _app.state.rabbit_publisher is not None:
+            _app.state.rabbit_publisher.close()
 
 
 def create_app(settings: CryptoSettings | None = None) -> FastAPI:
@@ -72,6 +76,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.state.payments_settings = PaymentsSettings.from_env()
     application.state.reviews_settings = ReviewsSettings.from_env()
     application.state.kafka_settings = KafkaSettings.from_env()
+    application.state.rabbit_settings = RabbitSettings.from_env()
 
     if resolved.enabled:
         application.add_middleware(
