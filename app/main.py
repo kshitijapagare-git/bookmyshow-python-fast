@@ -1,7 +1,9 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from .crypto.config import CryptoSettings
 from .crypto.keys import load_key_pair
@@ -19,6 +21,7 @@ from .kafka_consumer import (
     build_kafka_event_consumer,
 )
 from .kafka_producer import KafkaSettings, build_event_publisher
+from .media import KIND_SUBDIRS, MEDIA_URL_PREFIX, MediaSettings
 from .payments_client import PaymentsSettings
 from .rabbit_publisher import RabbitSettings, build_rabbit_publisher
 from .reviews_client import ReviewsSettings
@@ -56,6 +59,14 @@ async def _sweep_expired_holds() -> None:
         await asyncio.sleep(HOLD_SWEEP_INTERVAL_SECONDS)
         with SessionLocal() as db:
             release_expired_holds(db)
+
+
+def _ensure_media_directories(settings: MediaSettings) -> None:
+    """Create the media root and its per-kind subdirectories before mounting them."""
+    root = Path(settings.upload_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    for subdir in KIND_SUBDIRS.values():
+        (root / subdir).mkdir(parents=True, exist_ok=True)
 
 
 @asynccontextmanager
@@ -106,6 +117,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.state.crypto_sessions = SessionStore()
     application.state.payments_settings = PaymentsSettings.from_env()
     application.state.reviews_settings = ReviewsSettings.from_env()
+    application.state.media_settings = MediaSettings.from_env()
     application.state.kafka_settings = KafkaSettings.from_env()
     application.state.kafka_consumer_settings = KafkaConsumerSettings.from_env()
     application.state.kafka_consumer_state = KafkaConsumerState()
@@ -131,6 +143,15 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
         )
 
     register_error_handlers(application)
+
+    # Mounted from this app's own settings, so a per-app MEDIA_UPLOAD_DIR is honoured;
+    # StaticFiles refuses to mount a directory that does not exist yet.
+    _ensure_media_directories(application.state.media_settings)
+    application.mount(
+        MEDIA_URL_PREFIX,
+        StaticFiles(directory=application.state.media_settings.upload_dir),
+        name="media",
+    )
 
     application.include_router(cities.router)
     application.include_router(cinemas.router)

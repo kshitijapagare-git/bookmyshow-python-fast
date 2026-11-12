@@ -124,3 +124,19 @@ def require_service_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=INVALID_SERVICE_TOKEN_DETAIL,
         )
+
+
+MEDIA_SERVICE_TOKEN = os.getenv("MEDIA_SERVICE_TOKEN", "dev-service-token").strip()
+INVALID_MEDIA_TOKEN_DETAIL = "Invalid media service token"
+
+
+def require_media_service_token(
+    x_internal_token: Annotated[str | None, Header(alias="X-Internal-Token")] = None,
+) -> None:
+    """The catalogue operator's token for media uploads; missing or wrong is a 401."""
+    presented = (x_internal_token or "").strip()
+    if not presented or not secrets.compare_digest(presented, MEDIA_SERVICE_TOKEN):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=INVALID_MEDIA_TOKEN_DETAIL,
+        )

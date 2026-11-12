@@ -1,9 +1,14 @@
 import os
+import tempfile
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 # Keep the existing controller tests on the plain path; the crypto tests turn it on
 # through create_app(CryptoSettings(...)) instead of an environment variable.
 os.environ.setdefault("CRYPTO_ENABLED", "false")
+# The media tests assert the /media mount serves the bytes they uploaded, so the
+# directory is a fresh temp one: it must be set before app.main builds the mount, and
+# it keeps uploaded bytes out of the repository.
+os.environ.setdefault("MEDIA_UPLOAD_DIR", tempfile.mkdtemp(prefix="bms-media-"))
 
 import pytest
 from fastapi.testclient import TestClient

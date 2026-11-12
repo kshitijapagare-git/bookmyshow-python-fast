@@ -2,6 +2,7 @@ fastapi>=0.115
 uvicorn[standard]>=0.32
 SQLAlchemy>=2.0
 pydantic>=2.9
+python-multipart>=0.0.9
 pytest>=8.3
 httpx>=0.28
 bcrypt>=4.2
