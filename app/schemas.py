@@ -100,6 +100,21 @@ class MovieOut(BaseModel):
     interestedCount: int = 0
 
 
+class MediaKind(str, Enum):
+    POSTER = "POSTER"
+    BACKDROP = "BACKDROP"
+    TRAILER = "TRAILER"
+
+
+class MediaAssetOut(BaseModel):
+    assetId: int
+    kind: MediaKind
+    url: str
+    size: int
+    contentType: str
+    sha256: str
+
+
 class Availability(str, Enum):
     AVAILABLE = "AVAILABLE"
     FAST_FILLING = "FAST_FILLING"

@@ -7,6 +7,7 @@ it and are encrypted. The middleware's own 415/400/428 answers are built here an
 returned unencrypted, because there is no session key to encrypt them with.
 """
 
+import re
 import time
 
 from cryptography.exceptions import InvalidTag
@@ -20,6 +21,7 @@ from .keys import ServerKeyPair
 from .sessions import Session, SessionStore
 
 PUBLIC_PATHS = frozenset({"/api/crypto/public-key", "/api/crypto/session"})
+MEDIA_UPLOAD_PATH = re.compile(r"^/api/movies/\d+/media$")
 PLAIN_BODY_DETAIL = "Encrypted body required"
 DECRYPT_DETAIL = "Request could not be decrypted"
 SESSION_DETAIL = "Encryption session missing or expired"
@@ -51,6 +53,13 @@ def _header(headers: list[tuple[bytes, bytes]], name: bytes) -> str | None:
         if key.lower() == name:
             return value.decode("latin-1")
     return None
+
+
+def _is_media_upload(scope: Scope) -> bool:
+    """A plain `POST /api/movies/{id}/media`: another service's raw multipart upload."""
+    if scope.get("type") != "http" or scope.get("method") != "POST":
+        return False
+    return MEDIA_UPLOAD_PATH.fullmatch(scope.get("path", "")) is not None
 
 
 def _path_with_query(scope: Scope) -> str:
@@ -114,6 +123,12 @@ class CryptoMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("path") in PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        if _is_media_upload(scope):
+            # An internal multipart upload: its body is a stream that must not be
+            # buffered, and the caller reads the response as plain JSON.
             await self.app(scope, receive, send)
             return
 

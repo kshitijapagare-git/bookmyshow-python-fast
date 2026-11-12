@@ -366,3 +366,32 @@ class EventDelivery(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+
+
+class MediaAsset(Base):
+    """One uploaded file for a movie's media kind, keyed by its content hash."""
+
+    __tablename__ = "media_assets"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('POSTER','BACKDROP','TRAILER')",
+            name="ck_media_assets_kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    movie_id: Mapped[int] = mapped_column(
+        ForeignKey("movies.id"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    storage_key: Mapped[str] = mapped_column(String, nullable=False)
+    url: Mapped[str] = mapped_column(String, nullable=False)
+    content_type: Mapped[str] = mapped_column(String, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
