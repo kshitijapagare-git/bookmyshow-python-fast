@@ -186,6 +186,51 @@ def test_a_second_poster_is_current_and_the_first_is_kept(client) -> None:
     assert detail.json()["posterUrl"] == second.json()["url"]
 
 
+def test_the_movie_and_card_urls_serve_the_current_assets(client) -> None:
+    poster = _upload(client, MOVIE_ID, "POSTER", POSTER_PAYLOAD, "image/png")
+    backdrop = _upload(client, MOVIE_ID, "BACKDROP", BACKDROP_PAYLOAD, "image/jpeg")
+    assert poster.status_code == 201
+    assert backdrop.status_code == 201
+
+    detail = client.get(f"/api/movies/{MOVIE_ID}")
+
+    assert detail.status_code == 200
+    first_read = detail.json()
+    assert first_read["posterUrl"] == poster.json()["url"]
+    assert first_read["backdropUrl"] == backdrop.json()["url"]
+
+    # The urls the movie endpoints hand back really serve the uploaded bytes.
+    served_poster = client.get(first_read["posterUrl"])
+    served_backdrop = client.get(first_read["backdropUrl"])
+
+    assert served_poster.status_code == 200
+    assert served_poster.content == POSTER_PAYLOAD
+    assert served_backdrop.status_code == 200
+    assert served_backdrop.content == BACKDROP_PAYLOAD
+
+    second = _upload(client, MOVIE_ID, "POSTER", SECOND_POSTER_PAYLOAD, "image/png")
+    assert second.status_code == 201
+
+    detail_after = client.get(f"/api/movies/{MOVIE_ID}")
+
+    assert detail_after.status_code == 200
+    second_read = detail_after.json()
+    assert second_read["posterUrl"] == second.json()["url"]
+    assert second_read["backdropUrl"] == backdrop.json()["url"]
+
+    served_second = client.get(second_read["posterUrl"])
+
+    assert served_second.status_code == 200
+    assert served_second.content == SECOND_POSTER_PAYLOAD
+
+    listed = client.get("/api/movies")
+
+    assert listed.status_code == 200
+    by_id = {movie["id"]: movie for movie in listed.json()}
+    assert by_id[MOVIE_ID]["posterUrl"] == second.json()["url"]
+    assert client.get(by_id[MOVIE_ID]["posterUrl"]).content == SECOND_POSTER_PAYLOAD
+
+
 @pytest.mark.parametrize(
     ("kind", "content_type"),
     [
