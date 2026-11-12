@@ -2,12 +2,13 @@
 
 from typing import cast
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..delivery import DeliveryPolicy, EventDeliveryService, get_delivery_policy
+from ..kafka_consumer import get_consumer_status
 from ..kafka_producer import DeliveryResult, EventPublisher, get_event_publisher
 from ..models import EventDelivery
 from ..rabbit_publisher import (
@@ -19,6 +20,7 @@ from ..schemas import (
     DeliveryStatusOut,
     EventPublishIn,
     EventPublishOut,
+    KafkaConsumerStatusOut,
     RabbitPublishOut,
 )
 from ..security import require_service_token
@@ -98,4 +100,18 @@ def get_delivery(eventId: str, db: Session = Depends(get_db)) -> DeliveryStatusO
         attempts=row.attempts,
         lastError=row.last_error,
         nextRetryAt=row.next_retry_at,
+    )
+
+
+@router.get("/kafka/status", response_model=KafkaConsumerStatusOut)
+def get_kafka_consumer_status(request: Request) -> KafkaConsumerStatusOut:
+    """This process's consumer state; a consumer that was never built reads running=false."""
+    current = get_consumer_status(request)
+    return KafkaConsumerStatusOut(
+        running=current.running,
+        topic=current.topic,
+        group=current.group,
+        processedCount=current.processed_count,
+        lastEventAt=current.last_event_at,
+        lastError=current.last_error,
     )
