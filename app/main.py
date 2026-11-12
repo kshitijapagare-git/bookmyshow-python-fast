@@ -10,6 +10,7 @@ from .crypto.sessions import SessionStore
 from .db import Base, SessionLocal, engine
 from .delivery import DeliveryPolicy
 from .errors import register_error_handlers
+from .event_bus import EventBusSettings, build_event_bus
 from .kafka_consumer import (
     HandlerRegistry,
     KafkaConsumerSettings,
@@ -64,6 +65,12 @@ async def lifespan(_app: FastAPI):
     _app.state.kafka_consumer_state = KafkaConsumerState()
     _app.state.event_publisher = build_event_publisher(_app.state.kafka_settings)
     _app.state.rabbit_publisher = build_rabbit_publisher(_app.state.rabbit_settings)
+    # Bound rather than replaced: subscriptions are registered on this same bus object,
+    # so swapping it here would silently drop everything registered before start-up.
+    _app.state.event_bus.bind_publishers(
+        kafka_publisher=_app.state.event_publisher,
+        rabbit_publisher=_app.state.rabbit_publisher,
+    )
     _app.state.event_consumer = build_kafka_event_consumer(
         settings=_app.state.kafka_settings,
         consumer_settings=_app.state.kafka_consumer_settings,
@@ -104,6 +111,10 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.state.event_consumer = None
     application.state.rabbit_settings = RabbitSettings.from_env()
     application.state.delivery_policy = DeliveryPolicy.from_env()
+    application.state.event_bus_settings = EventBusSettings.from_env()
+    application.state.event_bus = build_event_bus(
+        settings=application.state.event_bus_settings
+    )
 
     if resolved.enabled:
         application.add_middleware(

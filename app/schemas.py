@@ -11,6 +11,8 @@ from pydantic import (
     model_validator,
 )
 
+from .event_bus import EventBusTransport
+
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
@@ -513,3 +515,41 @@ class KafkaConsumerStatusOut(BaseModel):
     processedCount: int
     lastEventAt: datetime | None
     lastError: str | None
+
+
+class EventBusPublishIn(BaseModel):
+    """A caller-supplied event; the bus generates its `id` and `occurredAt`."""
+
+    type: NonBlank
+    version: int = Field(default=1, ge=1)
+    payload: dict[str, object]
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class EventBusHandlerErrorOut(BaseModel):
+    """One handler that raised while a published event was being dispatched."""
+
+    eventType: str
+    handler: str
+    error: str
+
+
+class EventBusPublishOut(BaseModel):
+    """The bus publish answer: the envelope's id and the handlers that failed."""
+
+    id: str
+    handlerErrors: list[EventBusHandlerErrorOut] = Field(default_factory=list)
+
+
+class EventBusSubscriptionOut(BaseModel):
+    """One in-process subscription, as `GET /api/events/subscriptions` lists it."""
+
+    eventType: str
+    handler: str
+
+
+class EventSubscriptionsOut(BaseModel):
+    """The transport the bus publishes on, plus every registration it holds."""
+
+    transport: EventBusTransport
+    subscriptions: list[EventBusSubscriptionOut]
