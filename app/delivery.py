@@ -13,6 +13,7 @@ every attempt on the broker's dead-letter destination. The record is bookkeeping
 part of a business transaction, so a broker failure rolls nothing back.
 """
 
+import logging
 import os
 import random
 import time
@@ -26,9 +27,12 @@ from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .event_metrics import EventMetrics, log_event
 from .kafka_producer import KafkaUnavailableError
 from .models import EventDelivery
 from .rabbit_publisher import RabbitUnavailableError
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BASE_DELAY_MS = 100
@@ -146,6 +150,7 @@ class EventDeliveryService:
         policy: DeliveryPolicy,
         db: Session,
         transport: Transport,
+        metrics: EventMetrics | None = None,
         sleep: Callable[[float], None] = time.sleep,
         rng: Callable[[], float] = random.random,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -154,8 +159,10 @@ class EventDeliveryService:
         self.policy = policy
         self.db = db
         self.transport = transport
+        self.metrics = metrics
         self.publish_call: Callable[..., object] = publisher.publish
         self.dead_letter_call: Callable[..., object] = publisher.publish_dead_letter
+        self._last_row: EventDelivery | None = None
         self._sleep = sleep
         self._rng = rng
         self._now = now
@@ -218,6 +225,16 @@ class EventDeliveryService:
                     last_error=_error_text(error),
                     next_retry_at=self._now() + timedelta(milliseconds=delay_ms),
                 )
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "event delivery retrying",
+                    event_id=event_id,
+                    event_type=event_type,
+                    transport=self.transport,
+                    attempt=attempt,
+                    detail=f"delayMs={delay_ms} error={_error_text(error)}",
+                )
                 self._sleep(delay_ms / 1000)
                 continue
 
@@ -269,6 +286,16 @@ class EventDeliveryService:
         self._write_state(
             row, attempt=attempt, status="DEAD_LETTERED", last_error=last_error
         )
+        log_event(
+            logger,
+            logging.WARNING,
+            "event dead-lettered",
+            event_id=row.event_id,
+            event_type=event_type,
+            transport=self.transport,
+            attempt=attempt,
+            detail=last_error,
+        )
         return DeliveryOutcome(
             event_id=row.event_id,
             status="DEAD_LETTERED",
@@ -293,6 +320,31 @@ class EventDeliveryService:
         row.next_retry_at = next_retry_at
         row.updated_at = self._now()
         self.db.commit()
+        self._last_row = row
+        self._record()
+
+    def _record(self) -> None:
+        """Count the transition just committed; no-op without a metrics registry."""
+        row = self._last_row
+        metrics = self.metrics
+        if row is None or metrics is None:
+            return
+        if row.status == "DELIVERED":
+            metrics.record_published(
+                event_type=row.event_type, transport=self.transport
+            )
+        elif row.status == "DEAD_LETTERED":
+            metrics.record_dead_lettered(
+                event_type=row.event_type, transport=self.transport
+            )
+        elif row.status == "RETRYING":
+            metrics.record_failed(event_type=row.event_type, transport=self.transport)
+            metrics.record_retried(
+                event_type=row.event_type, transport=self.transport
+            )
+        else:
+            # A rejected event stays PENDING and is never retried, so it only failed.
+            metrics.record_failed(event_type=row.event_type, transport=self.transport)
 
 
 def get_delivery_policy(request: Request) -> DeliveryPolicy:

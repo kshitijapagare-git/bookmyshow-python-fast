@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 
 from fastapi import Request
 
+from .event_metrics import DEFAULT_HEALTH_TIMEOUT_S, log_event
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
@@ -164,22 +166,40 @@ class EventPublisher:
                 on_delivery=self._on_delivery,
             )
         except Exception as exc:  # librdkafka's own error type is a lazy import
-            logger.warning("event produce failed eventId=%s: %s", event_id, exc)
+            log_event(
+                logger,
+                logging.WARNING,
+                "event produce failed",
+                event_id=event_id,
+                event_type=event_type,
+                transport="KAFKA",
+                detail=str(exc),
+            )
             raise KafkaUnavailableError() from None
 
         self._producer.poll(0)
         remaining = self._producer.flush(self.settings.flush_timeout_ms / 1000)
 
         if self._delivery_error is not None:
-            logger.warning(
-                "event delivery failed eventId=%s: %s", event_id, self._delivery_error
+            log_event(
+                logger,
+                logging.WARNING,
+                "event delivery failed",
+                event_id=event_id,
+                event_type=event_type,
+                transport="KAFKA",
+                detail=str(self._delivery_error),
             )
             raise KafkaUnavailableError()
         if remaining > 0 or self._delivered is None:
-            logger.warning(
-                "event not delivered within %sms eventId=%s",
-                self.settings.flush_timeout_ms,
-                event_id,
+            log_event(
+                logger,
+                logging.WARNING,
+                "event not delivered",
+                event_id=event_id,
+                event_type=event_type,
+                transport="KAFKA",
+                detail=f"flushTimeoutMs={self.settings.flush_timeout_ms}",
             )
             raise KafkaUnavailableError()
 
@@ -189,13 +209,15 @@ class EventPublisher:
             partition=int(self._delivered.partition()),
             offset=int(self._delivered.offset()),
         )
-        logger.info(
-            "event published eventId=%s type=%s topic=%s partition=%s offset=%s",
-            result.event_id,
-            event_type,
-            result.topic,
-            result.partition,
-            result.offset,
+        log_event(
+            logger,
+            logging.INFO,
+            "event published",
+            event_id=result.event_id,
+            event_type=event_type,
+            transport="KAFKA",
+            topic=result.topic,
+            detail=f"partition={result.partition} offset={result.offset}",
         )
         return result
 
@@ -242,8 +264,14 @@ class EventPublisher:
                 on_delivery=self._on_delivery,
             )
         except Exception as exc:  # librdkafka's own error type is a lazy import
-            logger.warning(
-                "dead-letter produce failed eventId=%s: %s", event_id, exc
+            log_event(
+                logger,
+                logging.WARNING,
+                "dead-letter produce failed",
+                event_id=event_id,
+                event_type=event_type,
+                transport="KAFKA",
+                detail=str(exc),
             )
             raise KafkaUnavailableError() from None
 
@@ -251,17 +279,25 @@ class EventPublisher:
         remaining = self._producer.flush(self.settings.flush_timeout_ms / 1000)
 
         if self._delivery_error is not None:
-            logger.warning(
-                "dead-letter delivery failed eventId=%s: %s",
-                event_id,
-                self._delivery_error,
+            log_event(
+                logger,
+                logging.WARNING,
+                "dead-letter delivery failed",
+                event_id=event_id,
+                event_type=event_type,
+                transport="KAFKA",
+                detail=str(self._delivery_error),
             )
             raise KafkaUnavailableError()
         if remaining > 0 or self._delivered is None:
-            logger.warning(
-                "dead-letter not delivered within %sms eventId=%s",
-                self.settings.flush_timeout_ms,
-                event_id,
+            log_event(
+                logger,
+                logging.WARNING,
+                "dead-letter not delivered",
+                event_id=event_id,
+                event_type=event_type,
+                transport="KAFKA",
+                detail=f"flushTimeoutMs={self.settings.flush_timeout_ms}",
             )
             raise KafkaUnavailableError()
 
@@ -271,17 +307,32 @@ class EventPublisher:
             partition=int(self._delivered.partition()),
             offset=int(self._delivered.offset()),
         )
-        logger.info(
-            "event dead-lettered eventId=%s type=%s topic=%s attempts=%s "
-            "partition=%s offset=%s",
-            result.event_id,
-            event_type,
-            result.topic,
-            attempts,
-            result.partition,
-            result.offset,
+        log_event(
+            logger,
+            logging.INFO,
+            "event dead-lettered",
+            event_id=result.event_id,
+            event_type=event_type,
+            transport="KAFKA",
+            topic=result.topic,
+            detail=(
+                f"attempts={attempts} partition={result.partition} "
+                f"offset={result.offset}"
+            ),
         )
         return result
+
+    def check_health(self, *, timeout_s: float = DEFAULT_HEALTH_TIMEOUT_S) -> bool:
+        """Whether the broker answers a metadata request; a failure reads as down."""
+        list_topics = getattr(self._producer, "list_topics", None)
+        if not callable(list_topics):
+            return False
+        try:
+            list_topics(timeout=timeout_s)
+        except Exception as exc:  # a gone broker must answer the health route, not raise
+            logger.warning("event broker health check failed: %s", exc)
+            return False
+        return True
 
     def close(self) -> None:
         """Flush with the same bounded timeout so shutdown cannot hang."""

@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 from fastapi import Request
 
+from .event_metrics import DEFAULT_HEALTH_TIMEOUT_S, log_event
 from .kafka_producer import build_envelope
 
 logger = logging.getLogger(__name__)
@@ -217,24 +218,29 @@ class RabbitPublisher:
                     properties=properties,
                 )
             except Exception as exc:  # pika's own error types are a lazy import
-                logger.warning(
-                    "event publish failed eventId=%s type=%s exchange=%s "
-                    "routingKey=%s: %s",
-                    event_id,
-                    event_type,
-                    self.settings.exchange,
-                    routing_key,
-                    exc,
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "event publish failed",
+                    event_id=event_id,
+                    event_type=event_type,
+                    transport="RABBIT",
+                    detail=(
+                        f"exchange={self.settings.exchange} "
+                        f"routingKey={routing_key} error={exc}"
+                    ),
                 )
                 self._reset()
                 raise RabbitUnavailableError() from None
 
-        logger.info(
-            "event published eventId=%s type=%s exchange=%s routingKey=%s",
-            event_id,
-            event_type,
-            self.settings.exchange,
-            routing_key,
+        log_event(
+            logger,
+            logging.INFO,
+            "event published",
+            event_id=event_id,
+            event_type=event_type,
+            transport="RABBIT",
+            detail=f"exchange={self.settings.exchange} routingKey={routing_key}",
         )
         return RabbitDeliveryResult(
             event_id=event_id,
@@ -292,33 +298,60 @@ class RabbitPublisher:
                     properties=properties,
                 )
             except Exception as exc:  # pika's own error types are a lazy import
-                logger.warning(
-                    "dead-letter publish failed eventId=%s type=%s exchange=%s "
-                    "routingKey=%s attempts=%s: %s",
-                    event_id,
-                    event_type,
-                    self.settings.exchange,
-                    routing_key,
-                    attempts,
-                    exc,
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "dead-letter publish failed",
+                    event_id=event_id,
+                    event_type=event_type,
+                    transport="RABBIT",
+                    attempt=attempts,
+                    detail=(
+                        f"exchange={self.settings.exchange} "
+                        f"routingKey={routing_key} error={exc}"
+                    ),
                 )
                 self._reset()
                 raise RabbitUnavailableError() from None
 
-        logger.info(
-            "event dead-lettered eventId=%s type=%s exchange=%s routingKey=%s "
-            "attempts=%s",
-            event_id,
-            event_type,
-            self.settings.exchange,
-            routing_key,
-            attempts,
+        log_event(
+            logger,
+            logging.INFO,
+            "event dead-lettered",
+            event_id=event_id,
+            event_type=event_type,
+            transport="RABBIT",
+            attempt=attempts,
+            detail=f"exchange={self.settings.exchange} routingKey={routing_key}",
         )
         return RabbitDeliveryResult(
             event_id=event_id,
             exchange=self.settings.exchange,
             routing_key=routing_key,
         )
+
+    def check_health(self, *, timeout_s: float = DEFAULT_HEALTH_TIMEOUT_S) -> bool:
+        """Whether the broker answers an idempotent exchange declare; never raises.
+
+        Re-declaring the durable topic exchange is idempotent and is a real broker
+        round-trip, so a broker that is gone reads as down without failing the
+        health route; pika's own socket timeout bounds the wait, which is why
+        `timeout_s` only keeps the shared probe signature.
+        """
+        with self._lock:
+            try:
+                channel = self._open_channel()
+                channel.exchange_declare(
+                    exchange=self.settings.exchange,
+                    exchange_type=EXCHANGE_TYPE,
+                    durable=True,
+                )
+            except Exception as exc:  # never let a broker failure reach the route
+                logger.warning("rabbit event broker health check failed: %s", exc)
+                self._reset()
+                return False
+            self._exchange_declared = True
+        return True
 
     def close(self) -> None:
         """Close the channel so shutdown cannot hang on a broken connection."""

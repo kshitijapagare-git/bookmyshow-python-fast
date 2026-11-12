@@ -31,6 +31,7 @@ from typing import Literal, Protocol
 from fastapi import Request
 
 from .delivery import DeliveryPolicy, _error_text, next_delay_ms
+from .event_metrics import EventMetrics, log_event
 from .kafka_producer import KafkaSettings
 
 logger = logging.getLogger(__name__)
@@ -304,6 +305,7 @@ class KafkaEventConsumer:
         registry: HandlerRegistry,
         publisher: object | None,
         policy: DeliveryPolicy,
+        metrics: EventMetrics | None = None,
         state: KafkaConsumerState | None = None,
         processed: ProcessedEventStore | None = None,
         consumer: object | None = None,
@@ -316,6 +318,7 @@ class KafkaEventConsumer:
         self.registry = registry
         self.publisher = publisher
         self.policy = policy
+        self.metrics = metrics
         self.state = state if state is not None else KafkaConsumerState()
         self.processed = processed if processed is not None else ProcessedEventStore()
         self.dead_letter_call: Callable[..., object] | None = (
@@ -388,7 +391,7 @@ class KafkaEventConsumer:
             except Exception as exc:  # a broken broker must not kill the thread
                 self.state.last_error = _error_text(exc)
                 logger.warning(
-                    "event consumer poll failed topic=%s group=%s: %s",
+                    "event consumer poll failed transport=KAFKA topic=%s group=%s: %s",
                     self.settings.events_topic,
                     self.consumer_settings.group,
                     exc,
@@ -417,25 +420,30 @@ class KafkaEventConsumer:
             return "MALFORMED"
 
         if event.event_id in self.processed:
-            logger.info(
-                "event consumer skipped a duplicate eventId=%s type=%s topic=%s "
-                "group=%s",
-                event.event_id,
-                event.type,
-                self.settings.events_topic,
-                self.consumer_settings.group,
+            log_event(
+                logger,
+                logging.INFO,
+                "event consumer skipped a duplicate",
+                event_id=event.event_id,
+                event_type=event.type,
+                transport="KAFKA",
+                topic=self.settings.events_topic,
+                detail=f"group={self.consumer_settings.group}",
             )
             self._commit(message)
             return "DUPLICATE"
 
         handler = self.registry.get(event.type)
         if handler is None:
-            logger.warning(
-                "event consumer has no handler eventId=%s type=%s topic=%s group=%s",
-                event.event_id,
-                event.type,
-                self.settings.events_topic,
-                self.consumer_settings.group,
+            log_event(
+                logger,
+                logging.WARNING,
+                "event consumer has no handler",
+                event_id=event.event_id,
+                event_type=event.type,
+                transport="KAFKA",
+                topic=self.settings.events_topic,
+                detail=f"group={self.consumer_settings.group}",
             )
             self._commit(message)
             return "UNKNOWN_TYPE"
@@ -451,29 +459,46 @@ class KafkaEventConsumer:
                     return self._dead_letter(
                         message, event, attempt=attempt, last_error=last_error
                     )
+                # Only a failure that is going to be retried counts as failed; the
+                # final attempt is counted as dead-lettered instead.
+                if self.metrics is not None:
+                    self.metrics.record_failed(
+                        event_type=event.type, transport="KAFKA"
+                    )
                 delay_ms = next_delay_ms(self.policy, attempt, rng=self._rng)
-                logger.warning(
-                    "event consumer retrying eventId=%s type=%s attempt=%s "
-                    "delayMs=%s error=%s",
-                    event.event_id,
-                    event.type,
-                    attempt,
-                    delay_ms,
-                    last_error,
+                if self.metrics is not None:
+                    self.metrics.record_retried(
+                        event_type=event.type, transport="KAFKA"
+                    )
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "event consumer retrying",
+                    event_id=event.event_id,
+                    event_type=event.type,
+                    transport="KAFKA",
+                    attempt=attempt,
+                    topic=self.settings.events_topic,
+                    detail=f"delayMs={delay_ms} error={last_error}",
                 )
                 self._sleep(delay_ms / 1000)
                 continue
 
+            if self.metrics is not None:
+                self.metrics.record_consumed(event_type=event.type, transport="KAFKA")
             self.processed.add(event.event_id)
             self._record_success()
             self._commit(message)
-            logger.info(
-                "event consumed eventId=%s type=%s topic=%s group=%s attempt=%s",
-                event.event_id,
-                event.type,
-                self.settings.events_topic,
-                self.consumer_settings.group,
-                attempt,
+            log_event(
+                logger,
+                logging.INFO,
+                "event consumed",
+                event_id=event.event_id,
+                event_type=event.type,
+                transport="KAFKA",
+                attempt=attempt,
+                topic=self.settings.events_topic,
+                detail=f"group={self.consumer_settings.group}",
             )
             return "HANDLED"
 
@@ -487,11 +512,17 @@ class KafkaEventConsumer:
     ) -> ProcessOutcome:
         """Park the event on the publisher's DLQ; only a successful park commits."""
         if self.dead_letter_call is None:
+            if self.metrics is not None:
+                self.metrics.record_failed(event_type=event.type, transport="KAFKA")
             self.state.last_error = last_error
-            logger.warning(
-                "event consumer could not dead-letter eventId=%s type=%s: no publisher",
-                event.event_id,
-                event.type,
+            log_event(
+                logger,
+                logging.WARNING,
+                "event consumer could not dead-letter",
+                event_id=event.event_id,
+                event_type=event.type,
+                transport="KAFKA",
+                detail=f"no publisher error={last_error}",
             )
             return "DEAD_LETTER_FAILED"
 
@@ -508,28 +539,41 @@ class KafkaEventConsumer:
         except Exception as error:
             # Neither handled nor parked, so the offset stays uncommitted and the
             # record is redelivered rather than silently lost.
+            if self.metrics is not None:
+                self.metrics.record_failed(event_type=event.type, transport="KAFKA")
             self.state.last_error = _error_text(error)
-            logger.warning(
-                "event consumer dead-letter failed eventId=%s type=%s topic=%s "
-                "group=%s: %s",
-                event.event_id,
-                event.type,
-                self.settings.events_topic,
-                self.consumer_settings.group,
-                self.state.last_error,
+            log_event(
+                logger,
+                logging.WARNING,
+                "event consumer dead-letter failed",
+                event_id=event.event_id,
+                event_type=event.type,
+                transport="KAFKA",
+                topic=self.settings.events_topic,
+                detail=(
+                    f"group={self.consumer_settings.group} "
+                    f"error={self.state.last_error}"
+                ),
             )
             return "DEAD_LETTER_FAILED"
 
+        if self.metrics is not None:
+            self.metrics.record_dead_lettered(
+                event_type=event.type, transport="KAFKA"
+            )
         self.processed.add(event.event_id)
         self._record_success()
         self._commit(message)
-        logger.info(
-            "event dead-lettered eventId=%s type=%s topic=%s group=%s attempts=%s",
-            event.event_id,
-            event.type,
-            self.settings.events_topic,
-            self.consumer_settings.group,
-            attempt,
+        log_event(
+            logger,
+            logging.INFO,
+            "event dead-lettered",
+            event_id=event.event_id,
+            event_type=event.type,
+            transport="KAFKA",
+            attempt=attempt,
+            topic=self.settings.events_topic,
+            detail=f"group={self.consumer_settings.group}",
         )
         return "DEAD_LETTERED"
 
@@ -562,6 +606,7 @@ def build_kafka_event_consumer(
     publisher: object | None,
     policy: DeliveryPolicy,
     state: KafkaConsumerState,
+    metrics: EventMetrics | None = None,
 ) -> KafkaEventConsumer | None:
     """The process's consumer, or None when the broker client cannot be built.
 
@@ -578,6 +623,7 @@ def build_kafka_event_consumer(
         registry=registry,
         publisher=publisher,
         policy=policy,
+        metrics=metrics,
         state=state,
         consumer=client,
     )

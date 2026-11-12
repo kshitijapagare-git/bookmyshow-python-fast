@@ -2,13 +2,21 @@
 
 from typing import cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import PlainTextResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..delivery import DeliveryPolicy, EventDeliveryService, get_delivery_policy
 from ..event_bus import EventBus, EventEnvelope, get_event_bus
+from ..event_metrics import (
+    EventMetrics,
+    EventMetricsSettings,
+    get_event_metrics,
+    get_event_metrics_settings,
+    prometheus_text,
+)
 from ..kafka_consumer import get_consumer_status
 from ..kafka_producer import DeliveryResult, EventPublisher, get_event_publisher
 from ..models import EventDelivery
@@ -23,6 +31,11 @@ from ..schemas import (
     EventBusPublishIn,
     EventBusPublishOut,
     EventBusSubscriptionOut,
+    EventHealthOut,
+    EventLogEntryOut,
+    EventLogOut,
+    EventMetricsBucketOut,
+    EventMetricsOut,
     EventPublishIn,
     EventPublishOut,
     EventSubscriptionsOut,
@@ -46,10 +59,15 @@ def publish_kafka_event(
     db: Session = Depends(get_db),
     policy: DeliveryPolicy = Depends(get_delivery_policy),
     publisher: EventPublisher = Depends(get_event_publisher),
+    metrics: EventMetrics = Depends(get_event_metrics),
 ) -> EventPublishOut:
     """Publish through the shared retry wrapper; a 503 means it was never parked."""
     outcome = EventDeliveryService(
-        publisher=publisher, policy=policy, db=db, transport="KAFKA"
+        publisher=publisher,
+        policy=policy,
+        db=db,
+        transport="KAFKA",
+        metrics=metrics,
     ).deliver(
         event_type=payload.type,
         payload=payload.payload,
@@ -73,10 +91,15 @@ def publish_rabbit_event(
     db: Session = Depends(get_db),
     policy: DeliveryPolicy = Depends(get_delivery_policy),
     publisher: RabbitPublisher = Depends(get_rabbit_publisher),
+    metrics: EventMetrics = Depends(get_event_metrics),
 ) -> RabbitPublishOut:
     """Publish through the shared retry wrapper; a 503 means it was never parked."""
     outcome = EventDeliveryService(
-        publisher=publisher, policy=policy, db=db, transport="RABBIT"
+        publisher=publisher,
+        policy=policy,
+        db=db,
+        transport="RABBIT",
+        metrics=metrics,
     ).deliver(
         event_type=payload.type,
         payload=payload.payload,
@@ -163,4 +186,106 @@ def list_event_subscriptions(
             )
             for subscription in bus.subscriptions()
         ],
+    )
+
+
+@router.get(
+    "/metrics",
+    response_model=EventMetricsOut,
+    responses={200: {"content": {"text/plain": {}}}},
+)
+def read_event_metrics(
+    metrics: EventMetrics = Depends(get_event_metrics),
+    settings: EventMetricsSettings = Depends(get_event_metrics_settings),
+) -> EventMetricsOut | Response:
+    """The process's event counters; Prometheus text when EVENT_METRICS_FORMAT asks."""
+    buckets = metrics.snapshot()
+    last_event_at = metrics.last_event_at
+    if settings.format == "prometheus":
+        return PlainTextResponse(
+            prometheus_text(buckets, last_event_at),
+            media_type="text/plain; version=0.0.4",
+        )
+    return EventMetricsOut(
+        counters=[
+            EventMetricsBucketOut(
+                type=bucket.event_type,
+                transport=bucket.transport,
+                published=bucket.published,
+                consumed=bucket.consumed,
+                failed=bucket.failed,
+                retried=bucket.retried,
+                deadLettered=bucket.dead_lettered,
+            )
+            for bucket in buckets
+        ],
+        lastEventAt=last_event_at,
+    )
+
+
+def _kafka_up(publisher: object | None) -> str:
+    """ "up" only when the Kafka publisher exists and its probe answers successfully."""
+    if publisher is None:
+        return "down"
+    check_health = getattr(publisher, "check_health", None)
+    if not callable(check_health):
+        return "down"
+    try:
+        return "up" if check_health() is True else "down"
+    except Exception:  # a probe must never turn the health route into a 5xx
+        return "down"
+
+
+def _rabbit_up(publisher: object | None) -> str:
+    """ "up" only when the RabbitMQ publisher exists and its probe answers successfully."""
+    if publisher is None:
+        return "down"
+    check_health = getattr(publisher, "check_health", None)
+    if not callable(check_health):
+        return "down"
+    try:
+        return "up" if check_health() is True else "down"
+    except Exception:  # a probe must never turn the health route into a 5xx
+        return "down"
+
+
+@router.get("/health", response_model=EventHealthOut)
+def get_event_health(request: Request) -> EventHealthOut:
+    """FastAPI, Kafka and RabbitMQ each up or down; always a 200, per the clarification."""
+    return EventHealthOut(
+        fastapi="up",
+        kafka=_kafka_up(getattr(request.app.state, "event_publisher", None)),
+        rabbitmq=_rabbit_up(getattr(request.app.state, "rabbit_publisher", None)),
+    )
+
+
+@router.get("/log", response_model=EventLogOut)
+def list_recent_events(
+    limit: int | None = Query(default=None, ge=1),
+    type: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    settings: EventMetricsSettings = Depends(get_event_metrics_settings),
+) -> EventLogOut:
+    """Recent delivery summaries, newest first; they carry no payload content at all."""
+    effective_limit = limit if limit is not None else settings.log_limit
+    statement = select(EventDelivery)
+    if type is not None:
+        statement = statement.where(EventDelivery.event_type == type)
+    rows = db.scalars(
+        statement.order_by(
+            EventDelivery.updated_at.desc(), EventDelivery.id.desc()
+        ).limit(effective_limit)
+    ).all()
+    return EventLogOut(
+        entries=[
+            EventLogEntryOut(
+                eventId=row.event_id,
+                type=row.event_type,
+                transport=row.transport,
+                status=row.status,
+                timestamp=row.updated_at,
+            )
+            for row in rows
+        ],
+        limit=effective_limit,
     )

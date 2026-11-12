@@ -11,6 +11,7 @@ from .db import Base, SessionLocal, engine
 from .delivery import DeliveryPolicy
 from .errors import register_error_handlers
 from .event_bus import EventBusSettings, build_event_bus
+from .event_metrics import EventMetrics, EventMetricsSettings
 from .kafka_consumer import (
     HandlerRegistry,
     KafkaConsumerSettings,
@@ -78,6 +79,7 @@ async def lifespan(_app: FastAPI):
         publisher=_app.state.event_publisher,
         policy=_app.state.delivery_policy,
         state=_app.state.kafka_consumer_state,
+        metrics=_app.state.event_metrics,
     )
     if _app.state.event_consumer is not None:
         _app.state.event_consumer.start()
@@ -111,9 +113,14 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.state.event_consumer = None
     application.state.rabbit_settings = RabbitSettings.from_env()
     application.state.delivery_policy = DeliveryPolicy.from_env()
+    # Built before the bus so the bus reports into this very registry; the lifespan
+    # never replaces it, because the bus holds the reference.
+    application.state.event_metrics = EventMetrics()
+    application.state.event_metrics_settings = EventMetricsSettings.from_env()
     application.state.event_bus_settings = EventBusSettings.from_env()
     application.state.event_bus = build_event_bus(
-        settings=application.state.event_bus_settings
+        settings=application.state.event_bus_settings,
+        metrics=application.state.event_metrics,
     )
 
     if resolved.enabled:
