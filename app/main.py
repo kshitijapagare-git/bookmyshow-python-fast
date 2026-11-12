@@ -9,6 +9,7 @@ from .crypto.middleware import CryptoMiddleware
 from .crypto.sessions import SessionStore
 from .db import Base, SessionLocal, engine
 from .errors import register_error_handlers
+from .kafka_producer import KafkaSettings, build_event_publisher
 from .payments_client import PaymentsSettings
 from .reviews_client import ReviewsSettings
 from .routers import (
@@ -17,6 +18,7 @@ from .routers import (
     cities,
     cinemas,
     crypto,
+    events,
     groups,
     holds,
     internal_bookings,
@@ -49,6 +51,7 @@ async def _sweep_expired_holds() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    _app.state.event_publisher = build_event_publisher(_app.state.kafka_settings)
     sweeper = asyncio.create_task(_sweep_expired_holds())
     try:
         yield
@@ -56,6 +59,8 @@ async def lifespan(_app: FastAPI):
         sweeper.cancel()
         with suppress(asyncio.CancelledError):
             await sweeper
+        if _app.state.event_publisher is not None:
+            _app.state.event_publisher.close()
 
 
 def create_app(settings: CryptoSettings | None = None) -> FastAPI:
@@ -66,6 +71,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.state.crypto_sessions = SessionStore()
     application.state.payments_settings = PaymentsSettings.from_env()
     application.state.reviews_settings = ReviewsSettings.from_env()
+    application.state.kafka_settings = KafkaSettings.from_env()
 
     if resolved.enabled:
         application.add_middleware(
@@ -91,6 +97,7 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
     application.include_router(transfers.router)
     application.include_router(groups.router)
     application.include_router(crypto.router)
+    application.include_router(events.router)
     return application
 
 

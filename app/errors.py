@@ -5,6 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .kafka_producer import KafkaUnavailableError
 from .seating import SeatsUnavailableError
 
 
@@ -64,9 +65,16 @@ async def seats_unavailable_exception_handler(
     )
 
 
+async def kafka_unavailable_exception_handler(
+    request: Request, exc: KafkaUnavailableError
+) -> JSONResponse:
+    return _problem_detail_response(request, 503, exc.detail)
+
+
 def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, problem_details_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(
         SeatsUnavailableError, seats_unavailable_exception_handler
     )
+    app.add_exception_handler(KafkaUnavailableError, kafka_unavailable_exception_handler)

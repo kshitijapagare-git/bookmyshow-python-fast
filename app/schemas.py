@@ -471,3 +471,19 @@ class ReviewEligibilityOut(BaseModel):
     eligible: bool
     movieId: int
     showStartsAt: datetime
+
+
+class EventPublishIn(BaseModel):
+    """A caller-supplied domain event; the publisher builds the envelope around it."""
+
+    type: NonBlank
+    version: int = Field(default=1, ge=1)
+    payload: dict[str, object]
+    key: NonBlank | None = None
+
+
+class EventPublishOut(BaseModel):
+    eventId: str
+    topic: str
+    partition: int
+    offset: int
