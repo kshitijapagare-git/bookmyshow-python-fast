@@ -255,12 +255,16 @@ class _FakePublisher:
         partition: int = 4,
         offset: int = 11,
         outcome: str = "succeed",
+        dead_letter_outcome: str = "fail",
     ) -> None:
         self.topic = topic
         self.partition = partition
         self.offset = offset
         self.outcome = outcome
+        self.dead_letter_outcome = dead_letter_outcome
         self.calls: list[dict[str, object]] = []
+        self.event_ids: list[str | None] = []
+        self.dead_letters: list[dict[str, object]] = []
 
     def publish(
         self,
@@ -269,6 +273,7 @@ class _FakePublisher:
         payload: dict[str, object],
         version: int = 1,
         key: str | None = None,
+        event_id: str | None = None,
     ) -> DeliveryResult:
         self.calls.append(
             {
@@ -278,11 +283,44 @@ class _FakePublisher:
                 "key": key,
             }
         )
+        self.event_ids.append(event_id)
         if self.outcome == "unavailable":
             raise KafkaUnavailableError()
         return DeliveryResult(
-            event_id=str(uuid.uuid4()),
+            event_id=event_id if event_id is not None else str(uuid.uuid4()),
             topic=self.topic,
+            partition=self.partition,
+            offset=self.offset,
+        )
+
+    def publish_dead_letter(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        version: int = 1,
+        key: str | None = None,
+        attempts: int,
+        last_error: str,
+    ) -> DeliveryResult:
+        """Record the dead-letter write; only a `succeed` double actually parks it."""
+        self.dead_letters.append(
+            {
+                "event_id": event_id,
+                "event_type": event_type,
+                "payload": payload,
+                "version": version,
+                "key": key,
+                "attempts": attempts,
+                "last_error": last_error,
+            }
+        )
+        if self.dead_letter_outcome == "fail":
+            raise KafkaUnavailableError()
+        return DeliveryResult(
+            event_id=event_id,
+            topic=f"{self.topic}.dlq",
             partition=self.partition,
             offset=self.offset,
         )
@@ -437,7 +475,10 @@ def test_broker_down_returns_503(client) -> None:
     assert body["status"] == 503
     assert body["detail"] == KAFKA_UNAVAILABLE_DETAIL
     assert body["instance"] == EVENTS_URL
-    assert len(fake.calls) == 1
+    # The wrapper spends the whole attempt budget on the broken broker and then tries
+    # the dead-letter write, which this double refuses too, so the publish is a 503.
+    assert len(fake.calls) == client.app.state.delivery_policy.max_attempts
+    assert len(fake.dead_letters) == 1
 
 
 def test_publishing_requires_the_service_token(client) -> None:

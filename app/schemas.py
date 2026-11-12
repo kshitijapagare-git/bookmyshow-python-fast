@@ -493,3 +493,12 @@ class RabbitPublishOut(BaseModel):
     eventId: str
     exchange: str
     routingKey: str
+
+
+class DeliveryStatusOut(BaseModel):
+    """One event's delivery state, as `GET /api/events/deliveries/{eventId}` reads it."""
+
+    status: str
+    attempts: int
+    lastError: str | None
+    nextRetryAt: datetime | None

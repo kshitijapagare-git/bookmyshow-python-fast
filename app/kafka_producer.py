@@ -137,9 +137,10 @@ class EventPublisher:
         payload: dict[str, object],
         version: int = 1,
         key: str | None = None,
+        event_id: str | None = None,
     ) -> DeliveryResult:
         """Produce one event, waiting at most KAFKA_FLUSH_TIMEOUT_MS for its delivery."""
-        event_id = str(uuid.uuid4())
+        event_id = event_id if event_id is not None else str(uuid.uuid4())
         envelope = build_envelope(
             event_id=event_id,
             event_type=event_type,
@@ -193,6 +194,90 @@ class EventPublisher:
             result.event_id,
             event_type,
             result.topic,
+            result.partition,
+            result.offset,
+        )
+        return result
+
+    @property
+    def dead_letter_topic(self) -> str:
+        """Where an event that spent every attempt is parked: `{topic}.dlq`."""
+        return f"{self.settings.events_topic}.dlq"
+
+    def publish_dead_letter(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        version: int = 1,
+        key: str | None = None,
+        attempts: int,
+        last_error: str,
+    ) -> DeliveryResult:
+        """Park one event on the DLQ topic, reusing the eventId every attempt carried."""
+        topic = self.dead_letter_topic
+        envelope = build_envelope(
+            event_id=event_id,
+            event_type=event_type,
+            version=version,
+            occurred_at=datetime.now(timezone.utc),
+            payload=payload,
+            key=key,
+        )
+        self._delivered = None
+        self._delivery_error = None
+
+        try:
+            self._producer.produce(
+                topic,
+                value=json.dumps(envelope).encode("utf-8"),
+                key=key,
+                headers=[
+                    ("eventId", event_id.encode("utf-8")),
+                    ("type", event_type.encode("utf-8")),
+                    ("attempts", str(attempts).encode("utf-8")),
+                    ("lastError", last_error.encode("utf-8")),
+                ],
+                on_delivery=self._on_delivery,
+            )
+        except Exception as exc:  # librdkafka's own error type is a lazy import
+            logger.warning(
+                "dead-letter produce failed eventId=%s: %s", event_id, exc
+            )
+            raise KafkaUnavailableError() from None
+
+        self._producer.poll(0)
+        remaining = self._producer.flush(self.settings.flush_timeout_ms / 1000)
+
+        if self._delivery_error is not None:
+            logger.warning(
+                "dead-letter delivery failed eventId=%s: %s",
+                event_id,
+                self._delivery_error,
+            )
+            raise KafkaUnavailableError()
+        if remaining > 0 or self._delivered is None:
+            logger.warning(
+                "dead-letter not delivered within %sms eventId=%s",
+                self.settings.flush_timeout_ms,
+                event_id,
+            )
+            raise KafkaUnavailableError()
+
+        result = DeliveryResult(
+            event_id=event_id,
+            topic=topic,
+            partition=int(self._delivered.partition()),
+            offset=int(self._delivered.offset()),
+        )
+        logger.info(
+            "event dead-lettered eventId=%s type=%s topic=%s attempts=%s "
+            "partition=%s offset=%s",
+            result.event_id,
+            event_type,
+            result.topic,
+            attempts,
             result.partition,
             result.offset,
         )
