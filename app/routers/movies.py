@@ -1,6 +1,17 @@
 from datetime import timedelta
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    UploadFile,
+    status,
+)
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -17,12 +28,19 @@ from ..media import (
 from ..models import Cinema, City, MediaAsset, Movie, Screen, Show
 from ..schemas import MediaAssetOut, MediaKind, MovieOut, MovieSummaryOut
 from ..security import require_media_service_token
+from ..streaming import (
+    UnsatisfiableRangeError,
+    iter_file_range,
+    parse_range_header,
+)
 from ..timeutil import today_ist, utc_from_ist
 
 router = APIRouter(prefix="/api/movies", tags=["movies"])
 
 UPCOMING_SHOW_DAYS = 7
 IMAGE_KINDS = (MediaKind.POSTER, MediaKind.BACKDROP)
+ACCEPT_RANGES = "bytes"
+RANGE_NOT_SATISFIABLE_DETAIL = "Range not satisfiable"
 
 
 def _to_summary(movie: Movie) -> MovieSummaryOut:
@@ -39,7 +57,7 @@ def _to_summary(movie: Movie) -> MovieSummaryOut:
     )
 
 
-def _to_detail(movie: Movie) -> MovieOut:
+def _to_detail(movie: Movie, db: Session) -> MovieOut:
     return MovieOut(
         id=movie.id,
         title=movie.title,
@@ -57,7 +75,7 @@ def _to_detail(movie: Movie) -> MovieOut:
         certificate=movie.certificate,
         releaseDate=movie.release_date,
         backdropUrl=movie.backdrop_url,
-        trailerUrl=movie.trailer_url,
+        trailerUrl=_current_trailer_url(movie, db),
         interestedCount=movie.interested_count,
     )
 
@@ -97,7 +115,7 @@ def get_movie(movie_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Movie not found: {movie_id}",
         )
-    return _to_detail(movie)
+    return _to_detail(movie, db)
 
 
 def _max_bytes_for(kind: MediaKind, settings: MediaSettings) -> int:
@@ -105,6 +123,54 @@ def _max_bytes_for(kind: MediaKind, settings: MediaSettings) -> int:
     if kind in IMAGE_KINDS:
         return settings.max_image_bytes
     return settings.max_video_bytes
+
+
+def trailer_endpoint_url(movie_id: int) -> str:
+    """The public url of the streaming route: where the detail's trailer pill points."""
+    return f"/api/movies/{movie_id}/trailer"
+
+
+def _current_trailer_url(movie: Movie, db: Session) -> str | None:
+    """The trailer pill's url: the streaming endpoint once a trailer upload exists.
+
+    A movie with no current TRAILER row keeps its stored `trailer_url` untouched, so a
+    seeded movie's YouTube link (which is not a streamable file) still reads as before.
+    """
+    current = db.scalar(
+        select(MediaAsset.id).where(
+            MediaAsset.movie_id == movie.id,
+            MediaAsset.kind == MediaKind.TRAILER.value,
+            MediaAsset.is_current.is_(True),
+        )
+    )
+    if current is None:
+        return movie.trailer_url
+    return trailer_endpoint_url(movie.id)
+
+
+def _current_trailer_asset(movie_id: int, db: Session) -> MediaAsset:
+    """The movie's current TRAILER row.
+
+    The row, not `movie.trailer_url`, is the source of truth: a seeded movie's
+    trailer_url holds a YouTube link that is not a file, and only an upload creates
+    a row whose storage key points at streamable bytes.
+    """
+    asset = db.scalars(
+        select(MediaAsset)
+        .where(
+            MediaAsset.movie_id == movie_id,
+            MediaAsset.kind == MediaKind.TRAILER.value,
+            MediaAsset.is_current.is_(True),
+        )
+        .order_by(MediaAsset.id.desc())
+        .limit(1)
+    ).first()
+    if asset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Trailer not found: {movie_id}",
+        )
+    return asset
 
 
 @router.post(
@@ -190,4 +256,63 @@ async def upload_movie_media(
         size=asset.size_bytes,
         contentType=asset.content_type,
         sha256=asset.sha256,
+    )
+
+
+@router.get(
+    "/{movie_id}/trailer",
+    response_class=StreamingResponse,
+    responses={
+        206: {"description": "The requested byte range of the trailer"},
+        404: {"description": "No such movie, or it has no current trailer"},
+        416: {"description": "The Range header names no slice of the trailer"},
+    },
+)
+async def stream_movie_trailer(
+    movie_id: int,
+    range_header: Annotated[str | None, Header(alias="Range")] = None,
+    db: Session = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage_backend),
+) -> StreamingResponse:
+    """Stream the movie's current trailer, honouring one `Range: bytes` slice.
+
+    The file is read through `iter_file_range`, so a browser can start playing after
+    the first chunk and seek with a Range request instead of downloading the whole
+    video. The route is public: a moviegoer's player loads it directly.
+    """
+    if db.get(Movie, movie_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Movie not found: {movie_id}",
+        )
+    asset = _current_trailer_asset(movie_id, db)
+    path = storage.path_for(asset.storage_key)
+
+    try:
+        byte_range = parse_range_header(range_header, asset.size_bytes)
+    except UnsatisfiableRangeError:
+        # A malformed or multi-part header is the same 416 as an unsatisfiable one,
+        # and the shared handler turns this into the RFC 7807 body.
+        raise HTTPException(
+            status_code=416, detail=RANGE_NOT_SATISFIABLE_DETAIL
+        ) from None
+
+    headers = {"Accept-Ranges": ACCEPT_RANGES}
+    if byte_range is None:
+        headers["Content-Length"] = str(asset.size_bytes)
+        return StreamingResponse(
+            iter_file_range(path, None),
+            media_type=asset.content_type,
+            headers=headers,
+        )
+
+    headers["Content-Range"] = (
+        f"bytes {byte_range.start}-{byte_range.end}/{asset.size_bytes}"
+    )
+    headers["Content-Length"] = str(byte_range.length)
+    return StreamingResponse(
+        iter_file_range(path, byte_range),
+        status_code=status.HTTP_206_PARTIAL_CONTENT,
+        media_type=asset.content_type,
+        headers=headers,
     )

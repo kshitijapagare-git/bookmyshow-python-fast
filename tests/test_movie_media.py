@@ -152,7 +152,11 @@ def test_upload_writes_the_current_url_into_the_movie(client) -> None:
     body = detail.json()
     assert body["posterUrl"] == poster.json()["url"]
     assert body["backdropUrl"] == backdrop.json()["url"]
-    assert body["trailerUrl"] == trailer.json()["url"]
+    # The trailer pill points at the streaming endpoint, not at the raw stored file.
+    assert body["trailerUrl"] == f"/api/movies/{MOVIE_ID}/trailer"
+    served_trailer = client.get(body["trailerUrl"])
+    assert served_trailer.status_code == 200
+    assert served_trailer.content == TRAILER_PAYLOAD
 
     listed = client.get("/api/movies")
 
