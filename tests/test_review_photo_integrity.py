@@ -462,3 +462,63 @@ def test_media_hash_algorithm_is_sha256_by_default_and_from_the_environment(
 
         # An unsupported or blank name falls back instead of raising.
         assert MediaSettings.from_env().hash_algorithm == "sha256"
+
+
+S3_ENV_NAMES = (
+    "S3_BUCKET",
+    "S3_REGION",
+    "S3_ENDPOINT_URL",
+    "S3_ACCESS_KEY_ID",
+    "S3_SECRET_ACCESS_KEY",
+    "S3_MEDIA_PREFIX",
+    "S3_SSE",
+)
+
+
+def test_s3_settings_are_read_from_the_environment_and_fall_back(monkeypatch) -> None:
+    for name in S3_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+    unset = MediaSettings.from_env()
+
+    assert unset.s3_bucket == ""
+    assert unset.s3_region == ""
+    assert unset.s3_endpoint_url == ""
+    assert unset.s3_access_key_id == ""
+    assert unset.s3_secret_access_key == ""
+    assert unset.s3_media_prefix == "media"
+    assert unset.s3_sse == ""
+
+    monkeypatch.setenv("S3_BUCKET", "bms-media")
+    monkeypatch.setenv("S3_REGION", "ap-south-1")
+    monkeypatch.setenv("S3_ENDPOINT_URL", "http://localhost:4566")
+    monkeypatch.setenv("S3_ACCESS_KEY_ID", "media-key")
+    monkeypatch.setenv("S3_SECRET_ACCESS_KEY", "media-secret")
+    monkeypatch.setenv("S3_MEDIA_PREFIX", "/uploads/")
+    monkeypatch.setenv("S3_SSE", "AES256")
+
+    configured = MediaSettings.from_env()
+
+    assert configured.s3_bucket == "bms-media"
+    assert configured.s3_region == "ap-south-1"
+    assert configured.s3_endpoint_url == "http://localhost:4566"
+    assert configured.s3_access_key_id == "media-key"
+    assert configured.s3_secret_access_key == "media-secret"
+    assert configured.s3_media_prefix == "/uploads/"
+    assert configured.s3_sse == "AES256"
+
+    # A blank value selects the default rather than raising, exactly as the other knobs do.
+    for name in S3_ENV_NAMES:
+        monkeypatch.setenv(name, "   ")
+
+    blank = MediaSettings.from_env()
+
+    assert blank.s3_bucket == ""
+    assert blank.s3_media_prefix == "media"
+    assert blank.s3_sse == ""
+
+    # Only AES256 turns server-side encryption on; anything else means none at all.
+    for unsupported in ("aws:kms", "none", "AES-256"):
+        monkeypatch.setenv("S3_SSE", unsupported)
+
+        assert MediaSettings.from_env().s3_sse == ""

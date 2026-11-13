@@ -30,6 +30,7 @@ import secrets
 import shutil
 import subprocess
 import time
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,8 @@ from app.crypto.middleware import (
 )
 from app.db import Base, SessionLocal, engine
 from app.main import create_app
+from app.media import get_media_settings, get_storage_backend
+from app.media_s3 import S3StorageBackend
 from app.models import MediaAsset, User
 from app.security import issue_token
 from seed import seed_data
@@ -81,6 +84,9 @@ PRESIGNED_UPLOAD_URL = "/api/media/{asset_id}/upload"
 COMPLETE_URL = "/api/media/{asset_id}/complete"
 AVATAR_PAYLOAD = b"\x89PNG\r\n\x1a\navatar-bytes"
 PRESIGN_KEYS = {"assetId", "uploadUrl", "method", "expiresIn", "headers"}
+STORAGE_HEALTH_URL = "/api/media/health/storage"
+S3_BUCKET = "bms-media"
+S3_MEDIA_PREFIX = "media"
 COMPLETE_WITH_AVATAR_KEYS = {
     "assetId",
     "url",
@@ -779,6 +785,133 @@ def test_presigned_upload_is_plain_under_encryption(
     assert "?token=" in upload_url
 
     # No X-Enc-Session header and no envelope: the token in the url is the whole guard.
+    uploaded = encrypted_client.put(
+        upload_url,
+        content=AVATAR_PAYLOAD,
+        headers={"Content-Type": "image/png"},
+    )
+
+    assert uploaded.status_code == 204
+    assert uploaded.content == b""
+
+
+class _FakeS3Client:
+    """The one boto3 call a presign makes: `generate_presigned_url`."""
+
+    def __init__(self) -> None:
+        self.presign_calls: list[dict[str, object]] = []
+
+    def generate_presigned_url(self, operation, *, Params=None, ExpiresIn=None):
+        params = dict(Params or {})
+        self.presign_calls.append(
+            {"operation": operation, "Params": params, "ExpiresIn": ExpiresIn}
+        )
+        return (
+            f"https://{params['Bucket']}.s3.amazonaws.com/{params['Key']}"
+            f"?X-Amz-Expires={ExpiresIn}"
+        )
+
+
+def test_presign_under_encryption_answers_an_s3_url_when_s3_is_active(
+    encrypted_client: TestClient,
+) -> None:
+    """With S3 selected the url points at the bucket, so the PUT never reaches our host."""
+    session_id, aes_key = handshake(encrypted_client)
+    _, token = _user_token(phone="+919876543232")
+    application = encrypted_client.app
+    settings = replace(
+        application.state.media_settings,
+        storage_backend="s3",
+        s3_bucket=S3_BUCKET,
+        s3_region="ap-south-1",
+        s3_media_prefix=S3_MEDIA_PREFIX,
+        s3_sse="AES256",
+    )
+    fake = _FakeS3Client()
+    application.dependency_overrides[get_media_settings] = lambda: settings
+    application.dependency_overrides[get_storage_backend] = lambda: S3StorageBackend(
+        settings, client=fake
+    )
+    try:
+        headers, envelope = seal_request(
+            encrypted_client,
+            session_id,
+            aes_key,
+            "POST",
+            PRESIGN_URL,
+            {
+                "purpose": "avatar",
+                "filename": "me.png",
+                "contentType": "image/png",
+                "size": len(AVATAR_PAYLOAD),
+            },
+        )
+        headers["Authorization"] = f"Bearer {token}"
+
+        presigned = _send(encrypted_client, "POST", PRESIGN_URL, headers, envelope)
+
+        assert presigned.status_code == 200
+        assert presigned.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+        presign_body = open_response(aes_key, 200, envelope["iv"], presigned.json())
+    finally:
+        application.dependency_overrides.pop(get_media_settings, None)
+        application.dependency_overrides.pop(get_storage_backend, None)
+
+    upload_url = presign_body["uploadUrl"]
+    assert upload_url.startswith(f"https://{S3_BUCKET}.s3.amazonaws.com/")
+    assert f"/{S3_MEDIA_PREFIX}/avatars/" in upload_url
+    # The signed local route is exactly what the S3 backend does not answer.
+    assert not upload_url.startswith("/api/media/")
+
+    assert presign_body["method"] == "PUT"
+    assert presign_body["headers"] == {"Content-Type": "image/png"}
+    assert len(fake.presign_calls) == 1
+    call = fake.presign_calls[0]
+    assert call["operation"] == "put_object"
+    assert call["Params"]["ServerSideEncryption"] == "AES256"
+    assert call["ExpiresIn"] == settings.presign_expires_seconds
+
+
+def test_storage_health_is_not_a_plain_bypass(encrypted_client: TestClient) -> None:
+    """The new route is read inside the envelope; only the local upload is carved out."""
+    refused = encrypted_client.get(STORAGE_HEALTH_URL)
+
+    assert refused.status_code == 428
+    problem = refused.json()
+    assert set(problem) == PROBLEM_DETAIL_KEYS
+    assert problem["title"] == "Precondition Required"
+    assert problem["status"] == 428
+    assert problem["detail"] == SESSION_DETAIL
+    assert problem["instance"] == STORAGE_HEALTH_URL
+    assert refused.headers["content-type"] == "application/json"
+
+    # The one existing carve-out still covers the local upload path and nothing else.
+    session_id, aes_key = handshake(encrypted_client)
+    _, token = _user_token(phone="+919876543233")
+    headers, envelope = seal_request(
+        encrypted_client,
+        session_id,
+        aes_key,
+        "POST",
+        PRESIGN_URL,
+        {
+            "purpose": "avatar",
+            "filename": "me.png",
+            "contentType": "image/png",
+            "size": len(AVATAR_PAYLOAD),
+        },
+    )
+    headers["Authorization"] = f"Bearer {token}"
+
+    presigned = _send(encrypted_client, "POST", PRESIGN_URL, headers, envelope)
+
+    assert presigned.status_code == 200
+    upload_url = open_response(
+        aes_key, 200, envelope["iv"], presigned.json()
+    )["uploadUrl"]
+    assert upload_url.startswith("/api/media/")
+    assert "?token=" in upload_url
+
     uploaded = encrypted_client.put(
         upload_url,
         content=AVATAR_PAYLOAD,

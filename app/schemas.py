@@ -199,6 +199,18 @@ class MediaCompleteOut(BaseModel):
     verified: bool
 
 
+class MediaStorageHealthOut(BaseModel):
+    """Which backend stores the media, which bucket it uses and whether it answers.
+
+    `bucket` is null for the local backend, and no credential, region or endpoint is
+    ever part of this body.
+    """
+
+    backend: str
+    bucket: str | None
+    reachable: bool
+
+
 class Availability(str, Enum):
     AVAILABLE = "AVAILABLE"
     FAST_FILLING = "FAST_FILLING"

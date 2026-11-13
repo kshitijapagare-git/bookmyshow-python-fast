@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .kafka_producer import KafkaUnavailableError
+from .media import StorageUnreachableError
 from .rabbit_publisher import RabbitUnavailableError
 from .seating import SeatsUnavailableError
 
@@ -78,6 +79,19 @@ async def rabbit_unavailable_exception_handler(
     return _problem_detail_response(request, 503, exc.detail)
 
 
+async def media_storage_unreachable_exception_handler(
+    request: Request, exc: StorageUnreachableError
+) -> JSONResponse:
+    """The shared ProblemDetail body plus `reachable`, which the ticket's 503 carries."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            **problem_detail_content(503, exc.detail, request.url.path),
+            "reachable": False,
+        },
+    )
+
+
 def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, problem_details_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
@@ -87,4 +101,7 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(KafkaUnavailableError, kafka_unavailable_exception_handler)
     app.add_exception_handler(
         RabbitUnavailableError, rabbit_unavailable_exception_handler
+    )
+    app.add_exception_handler(
+        StorageUnreachableError, media_storage_unreachable_exception_handler
     )

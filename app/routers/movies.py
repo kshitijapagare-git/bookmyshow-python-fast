@@ -30,7 +30,6 @@ from ..schemas import MediaAssetOut, MediaKind, MovieOut, MovieSummaryOut
 from ..security import require_media_service_token
 from ..streaming import (
     UnsatisfiableRangeError,
-    iter_file_range,
     parse_range_header,
 )
 from ..timeutil import today_ist, utc_from_ist
@@ -288,9 +287,10 @@ async def stream_movie_trailer(
 ) -> StreamingResponse:
     """Stream the movie's current trailer, honouring one `Range: bytes` slice.
 
-    The file is read through `iter_file_range`, so a browser can start playing after
-    the first chunk and seek with a Range request instead of downloading the whole
-    video. The route is public: a moviegoer's player loads it directly.
+    The bytes are read through `StorageBackend.iter_chunks`, so a browser can start
+    playing after the first chunk and seek with a Range request instead of downloading
+    the whole video -- and the object may live on a local disk or in a bucket. The route
+    is public: a moviegoer's player loads it directly.
     """
     if db.get(Movie, movie_id) is None:
         raise HTTPException(
@@ -298,7 +298,6 @@ async def stream_movie_trailer(
             detail=f"Movie not found: {movie_id}",
         )
     asset = _current_trailer_asset(movie_id, db)
-    path = storage.path_for(asset.storage_key)
 
     try:
         byte_range = parse_range_header(range_header, asset.size_bytes)
@@ -313,7 +312,7 @@ async def stream_movie_trailer(
     if byte_range is None:
         headers["Content-Length"] = str(asset.size_bytes)
         return StreamingResponse(
-            iter_file_range(path, None),
+            storage.iter_chunks(key=asset.storage_key),
             media_type=asset.content_type,
             headers=headers,
         )
@@ -323,7 +322,11 @@ async def stream_movie_trailer(
     )
     headers["Content-Length"] = str(byte_range.length)
     return StreamingResponse(
-        iter_file_range(path, byte_range),
+        storage.iter_chunks(
+            key=asset.storage_key,
+            offset=byte_range.start,
+            length=byte_range.length,
+        ),
         status_code=status.HTTP_206_PARTIAL_CONTENT,
         media_type=asset.content_type,
         headers=headers,
