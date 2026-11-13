@@ -157,6 +157,29 @@ class ReviewsClient:
             reviews.append(row)
         return reviews
 
+    def get_review(self, *, review_id: int) -> dict[str, object]:
+        """One review by id; an unknown review answers `{}` rather than raising."""
+        url = f"{self.settings.base_url}/internal/reviews/{review_id}"
+        headers = {"X-Service-Token": self.settings.service_token}
+
+        try:
+            response = httpx.get(
+                url, headers=headers, timeout=self.settings.timeout_seconds
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("reviews service review lookup error: %s", exc)
+            raise ReviewsUnavailableError(str(exc)) from None
+
+        if response.status_code == 404:
+            return {}
+
+        if not 200 <= response.status_code < 300:
+            raise ReviewsUnavailableError(
+                f"reviews service answered {response.status_code}"
+            )
+
+        return _as_object(_body(response))
+
     def transfer_review(self, *, review_id: int) -> dict[str, object]:
         """Mark a review TRANSFERRED; an unknown review simply has nothing to mark."""
         url = f"{self.settings.base_url}/internal/reviews/{review_id}/transfer"

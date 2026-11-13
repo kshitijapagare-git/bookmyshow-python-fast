@@ -1,15 +1,18 @@
-"""Storage for uploaded media: movie posters, backdrops, trailers and review photos.
+"""Storage for uploaded media: movie posters, backdrops, trailers, review photos and avatars.
 
 The bytes go through one `StorageBackend`, so the router never touches a filesystem
 or an SDK directly: `LocalStorageBackend` streams the upload in `CHUNK_SIZE` chunks
 into a `.part` file inside the destination directory, hashing the bytes with SHA-256
 as they go, and only then `os.replace`s the temp file into its final, content-addressed
 key. Saving the same bytes twice therefore lands on the same key, and an oversized or
-empty upload leaves nothing behind at all.
+empty upload leaves nothing behind at all. A multipart `save` is only an adapter over
+`save_stream`, so the bytes of a direct presigned upload and of a multipart one are
+written by the same code and end up under the same kind of key.
 
-`MediaSettings.from_env()` reads the six knobs -- the hash algorithm included -- with the
-same fall-back-not-raise convention as `PaymentsSettings` and `ReviewsSettings`: an
-absent, blank or unparseable value selects the default instead of raising.
+`MediaSettings.from_env()` reads the eight knobs -- the hash algorithm and the two
+presign ones included -- with the same fall-back-not-raise convention as
+`PaymentsSettings` and `ReviewsSettings`: an absent, blank or unparseable value
+selects the default instead of raising.
 
 `integrity_report` is the read-back seam for the integrity and verify routes: it streams
 the stored object through `digest_of_file` and compares the result in constant time with
@@ -21,6 +24,7 @@ import logging
 import os
 import secrets
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -36,6 +40,8 @@ DEFAULT_UPLOAD_DIR = "media"
 DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024
 DEFAULT_MEDIA_SERVICE_TOKEN = "dev-service-token"
+DEFAULT_PRESIGN_SECRET = "dev-presign-secret"
+DEFAULT_PRESIGN_EXPIRES_SECONDS = 300
 DEFAULT_HASH_ALGORITHM = "sha256"
 SUPPORTED_HASH_ALGORITHMS: frozenset[str] = frozenset({DEFAULT_HASH_ALGORITHM})
 
@@ -48,6 +54,7 @@ KIND_SUBDIRS: dict[MediaKind, str] = {
     MediaKind.BACKDROP: "backdrops",
     MediaKind.TRAILER: "trailers",
     MediaKind.REVIEW_PHOTO: "review-photos",
+    MediaKind.AVATAR: "avatars",
 }
 
 ALLOWED_CONTENT_TYPES: dict[MediaKind, dict[str, str]] = {
@@ -69,12 +76,18 @@ ALLOWED_CONTENT_TYPES: dict[MediaKind, dict[str, str]] = {
         "image/png": ".png",
         "image/webp": ".webp",
     },
+    MediaKind.AVATAR: {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    },
 }
 
 IMAGE_KINDS: tuple[MediaKind, ...] = (
     MediaKind.POSTER,
     MediaKind.BACKDROP,
     MediaKind.REVIEW_PHOTO,
+    MediaKind.AVATAR,
 )
 
 
@@ -136,6 +149,8 @@ class MediaSettings:
     max_video_bytes: int
     service_token: str
     hash_algorithm: str = DEFAULT_HASH_ALGORITHM
+    presign_secret: str = DEFAULT_PRESIGN_SECRET
+    presign_expires_seconds: int = DEFAULT_PRESIGN_EXPIRES_SECONDS
 
     @classmethod
     def from_env(cls) -> "MediaSettings":
@@ -157,6 +172,10 @@ class MediaSettings:
                 configured
                 if configured in SUPPORTED_HASH_ALGORITHMS
                 else DEFAULT_HASH_ALGORITHM
+            ),
+            presign_secret=_env("MEDIA_PRESIGN_SECRET", DEFAULT_PRESIGN_SECRET),
+            presign_expires_seconds=_positive_int(
+                "MEDIA_PRESIGN_EXPIRES_SECONDS", DEFAULT_PRESIGN_EXPIRES_SECONDS
             ),
         )
 
@@ -231,6 +250,17 @@ class StorageBackend(Protocol):
         """Stream `upload` into storage and answer the key, size and SHA-256 it got."""
         ...
 
+    async def save_stream(
+        self,
+        *,
+        kind: MediaKind,
+        content_type: str,
+        chunks: AsyncIterator[bytes],
+        max_bytes: int,
+    ) -> StoredObject:
+        """Stream raw chunks into storage and answer the key, size and SHA-256 they got."""
+        ...
+
     def public_url(self, key: str) -> str:
         """The public path the stored object is served from."""
         ...
@@ -262,7 +292,31 @@ class LocalStorageBackend:
         upload: UploadFile,
         max_bytes: int,
     ) -> StoredObject:
-        """Copy the stream to a temp file, then move it onto its sha-derived key."""
+        """Adapt a multipart upload onto `save_stream`, one `CHUNK_SIZE` read at a time."""
+        return await self.save_stream(
+            kind=kind,
+            content_type=content_type,
+            chunks=self._upload_chunks(upload),
+            max_bytes=max_bytes,
+        )
+
+    async def _upload_chunks(self, upload: UploadFile) -> AsyncIterator[bytes]:
+        """Yield the upload's bytes as they arrive, so it is never read whole."""
+        while True:
+            chunk = await upload.read(CHUNK_SIZE)
+            if not chunk:
+                return
+            yield chunk
+
+    async def save_stream(
+        self,
+        *,
+        kind: MediaKind,
+        content_type: str,
+        chunks: AsyncIterator[bytes],
+        max_bytes: int,
+    ) -> StoredObject:
+        """Copy the chunk stream to a temp file, then move it onto its sha-derived key."""
         destination_dir = Path(self.settings.upload_dir) / KIND_SUBDIRS[kind]
         destination_dir.mkdir(parents=True, exist_ok=True)
         part_path = destination_dir / f"{uuid.uuid4().hex}{PART_SUFFIX}"
@@ -271,10 +325,9 @@ class LocalStorageBackend:
         size = 0
         try:
             with part_path.open("wb") as sink:
-                while True:
-                    chunk = await upload.read(CHUNK_SIZE)
+                async for chunk in chunks:
                     if not chunk:
-                        break
+                        continue
                     size += len(chunk)
                     if size > max_bytes:
                         raise MediaTooLargeError(max_bytes)

@@ -369,30 +369,41 @@ class EventDelivery(Base):
 
 
 class MediaAsset(Base):
-    """One uploaded file for a media kind, keyed by its content hash."""
+    """One uploaded file for a media kind, keyed by its content hash.
+
+    A row created by `POST /api/media/presign` exists before any bytes do: its
+    `storage_key`, `url` and `sha256` stay None until the direct upload lands.
+    """
 
     __tablename__ = "media_assets"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('POSTER','BACKDROP','TRAILER','REVIEW_PHOTO')",
+            "kind IN ('POSTER','BACKDROP','TRAILER','REVIEW_PHOTO','AVATAR')",
             name="ck_media_assets_kind",
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    movie_id: Mapped[int] = mapped_column(
-        ForeignKey("movies.id"), nullable=False, index=True
+    # An avatar belongs to no movie, and a presigned asset exists before its bytes do.
+    movie_id: Mapped[int | None] = mapped_column(
+        ForeignKey("movies.id"), nullable=True, index=True
+    )
+    # The owner of an avatar; an asset that is not owner-scoped leaves this None.
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
     )
     # A review lives in the ratings service, so this is its id with no local foreign key.
     review_id: Mapped[int | None] = mapped_column(
         Integer, nullable=True, index=True
     )
     kind: Mapped[str] = mapped_column(String, nullable=False)
-    storage_key: Mapped[str] = mapped_column(String, nullable=False)
-    url: Mapped[str] = mapped_column(String, nullable=False)
+    # None marks a presigned asset whose bytes have not been uploaded yet.
+    storage_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    url: Mapped[str | None] = mapped_column(String, nullable=True)
     content_type: Mapped[str] = mapped_column(String, nullable=False)
-    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
-    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Holds the size declared at presign until complete confirms it.
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(

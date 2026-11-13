@@ -107,6 +107,7 @@ class MediaKind(str, Enum):
     BACKDROP = "BACKDROP"
     TRAILER = "TRAILER"
     REVIEW_PHOTO = "REVIEW_PHOTO"
+    AVATAR = "AVATAR"
 
 
 class MediaAssetOut(BaseModel):
@@ -150,6 +151,52 @@ class MediaVerifyOut(BaseModel):
     """Whether the submitted digest names the bytes storage holds right now."""
 
     match: bool
+
+
+class MediaUploadPurpose(str, Enum):
+    """Why a direct upload exists: the caller's avatar, or a photo for their review."""
+
+    AVATAR = "avatar"
+    REVIEW_PHOTO = "review_photo"
+
+
+class MediaPresignIn(BaseModel):
+    """A direct upload's declaration: what it is for, what it will be and how big."""
+
+    purpose: MediaUploadPurpose
+    ownerId: int | None = None
+    filename: NonBlank
+    contentType: NonBlank
+    size: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _review_photo_needs_an_owner(self) -> "MediaPresignIn":
+        """A review photo is always attached to one review, so its id is mandatory."""
+        if self.purpose is MediaUploadPurpose.REVIEW_PHOTO and self.ownerId is None:
+            raise ValueError("ownerId is required for a review_photo upload")
+        return self
+
+
+class MediaPresignOut(BaseModel):
+    """Where to send the bytes: the signed upload url and the one header to send."""
+
+    assetId: int
+    uploadUrl: str
+    method: Literal["PUT"] = "PUT"
+    expiresIn: int
+    headers: dict[str, str]
+
+
+class MediaCompleteOut(BaseModel):
+    """One completed direct upload: where the bytes are served and what they hash to."""
+
+    assetId: int
+    url: str
+    contentType: str
+    size: int
+    sha256: str
+    kind: MediaKind
+    verified: bool
 
 
 class Availability(str, Enum):

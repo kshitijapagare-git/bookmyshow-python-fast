@@ -76,6 +76,20 @@ PROBLEM_DETAIL_KEYS = {"type", "title", "status", "detail", "instance"}
 CITIES_URL = "/api/cities"
 OTP_REQUEST_URL = "/api/auth/otp/request"
 OTP_PAYLOAD = {"countryCode": "+91", "phone": "9876543210"}
+PRESIGN_URL = "/api/media/presign"
+PRESIGNED_UPLOAD_URL = "/api/media/{asset_id}/upload"
+COMPLETE_URL = "/api/media/{asset_id}/complete"
+AVATAR_PAYLOAD = b"\x89PNG\r\n\x1a\navatar-bytes"
+PRESIGN_KEYS = {"assetId", "uploadUrl", "method", "expiresIn", "headers"}
+COMPLETE_WITH_AVATAR_KEYS = {
+    "assetId",
+    "url",
+    "contentType",
+    "size",
+    "sha256",
+    "kind",
+    "verified",
+}
 UNWRAP_DETAIL = "Request could not be decrypted"
 AES_KEY_BYTES = 32
 REVIEW_PHOTO_URL = "/api/movies/{movie_id}/reviews/{review_id}/photo"
@@ -650,6 +664,129 @@ def test_integrity_and_verify_round_trip_through_an_encrypted_session(
     assert problem["status"] == 415
     assert problem["detail"] == PLAIN_BODY_DETAIL
     assert problem["instance"] == verify_url
+
+
+def test_presign_and_complete_stay_encrypted(encrypted_client: TestClient) -> None:
+    """Both JSON ends of a direct upload stay inside the envelope, as every route does."""
+    session_id, aes_key = handshake(encrypted_client)
+    _, token = _user_token(phone="+919876543230")
+    auth = {"Authorization": f"Bearer {token}"}
+    presign_payload = {
+        "purpose": "avatar",
+        "filename": "me.png",
+        "contentType": "image/png",
+        "size": len(AVATAR_PAYLOAD),
+    }
+
+    headers, envelope = seal_request(
+        encrypted_client, session_id, aes_key, "POST", PRESIGN_URL, presign_payload
+    )
+    headers.update(auth)
+
+    presigned = _send(encrypted_client, "POST", PRESIGN_URL, headers, envelope)
+
+    assert presigned.status_code == 200
+    assert presigned.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    presign_body = open_response(aes_key, 200, envelope["iv"], presigned.json())
+    assert set(presign_body) == PRESIGN_KEYS
+    assert presign_body["method"] == "PUT"
+    assert presign_body["headers"] == {"Content-Type": "image/png"}
+    assert (
+        presign_body["expiresIn"]
+        == encrypted_client.app.state.media_settings.presign_expires_seconds
+    )
+    assert presign_body["uploadUrl"].startswith(
+        PRESIGNED_UPLOAD_URL.format(asset_id=presign_body["assetId"]) + "?token="
+    )
+
+    plain_presign = encrypted_client.post(
+        PRESIGN_URL, json=presign_payload, headers=auth
+    )
+
+    assert plain_presign.status_code == 415
+    plain_body = plain_presign.json()
+    assert set(plain_body) == PROBLEM_DETAIL_KEYS
+    assert plain_body["title"] == "Unsupported Media Type"
+    assert plain_body["status"] == 415
+    assert plain_body["detail"] == PLAIN_BODY_DETAIL
+    assert plain_body["instance"] == PRESIGN_URL
+
+    # The bytes are the one plain step: the signed url carries its own token, and the
+    # client that sends them has no encryption session to seal them with.
+    uploaded = encrypted_client.put(
+        presign_body["uploadUrl"],
+        content=AVATAR_PAYLOAD,
+        headers={"Content-Type": "image/png"},
+    )
+
+    assert uploaded.status_code == 204
+    assert uploaded.content == b""
+
+    complete_url = COMPLETE_URL.format(asset_id=presign_body["assetId"])
+    completed = _send(
+        encrypted_client, "POST", complete_url, {**_session_headers(session_id), **auth}
+    )
+
+    assert completed.status_code == 200
+    assert completed.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    complete_body = open_response(aes_key, 200, "", completed.json())
+    assert set(complete_body) == COMPLETE_WITH_AVATAR_KEYS
+    assert complete_body["assetId"] == presign_body["assetId"]
+    assert complete_body["kind"] == "AVATAR"
+    assert complete_body["verified"] is True
+    assert complete_body["contentType"] == "image/png"
+    assert complete_body["size"] == len(AVATAR_PAYLOAD)
+    assert complete_body["sha256"] == hashlib.sha256(AVATAR_PAYLOAD).hexdigest()
+    assert complete_body["url"].startswith("/media/avatars/")
+
+    plain_complete = encrypted_client.post(complete_url, json={}, headers=auth)
+
+    assert plain_complete.status_code == 415
+    plain_complete_body = plain_complete.json()
+    assert set(plain_complete_body) == PROBLEM_DETAIL_KEYS
+    assert plain_complete_body["detail"] == PLAIN_BODY_DETAIL
+    assert plain_complete_body["instance"] == complete_url
+
+
+def test_presigned_upload_is_plain_under_encryption(
+    encrypted_client: TestClient,
+) -> None:
+    """The one new route outside the envelope: a browser PUTs bytes without a session."""
+    session_id, aes_key = handshake(encrypted_client)
+    _, token = _user_token(phone="+919876543231")
+    headers, envelope = seal_request(
+        encrypted_client,
+        session_id,
+        aes_key,
+        "POST",
+        PRESIGN_URL,
+        {
+            "purpose": "avatar",
+            "filename": "me.png",
+            "contentType": "image/png",
+            "size": len(AVATAR_PAYLOAD),
+        },
+    )
+    headers["Authorization"] = f"Bearer {token}"
+
+    presigned = _send(encrypted_client, "POST", PRESIGN_URL, headers, envelope)
+
+    assert presigned.status_code == 200
+    upload_url = open_response(
+        aes_key, 200, envelope["iv"], presigned.json()
+    )["uploadUrl"]
+    assert upload_url.startswith("/api/media/")
+    assert "?token=" in upload_url
+
+    # No X-Enc-Session header and no envelope: the token in the url is the whole guard.
+    uploaded = encrypted_client.put(
+        upload_url,
+        content=AVATAR_PAYLOAD,
+        headers={"Content-Type": "image/png"},
+    )
+
+    assert uploaded.status_code == 204
+    assert uploaded.content == b""
 
 
 def test_wrapped_key_from_the_webcrypto_fixture_opens_a_session(
