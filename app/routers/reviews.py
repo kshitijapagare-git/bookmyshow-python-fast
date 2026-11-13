@@ -5,7 +5,14 @@ from sqlalchemy.orm import Session
 from ..bookings import PAYMENTS_UNAVAILABLE_DETAIL
 from ..db import get_db
 from ..groups import find_member
-from ..models import Booking, Group, Show, User
+from ..media import (
+    MediaSettings,
+    StorageBackend,
+    get_media_settings,
+    get_storage_backend,
+    integrity_for,
+)
+from ..models import Booking, Group, MediaAsset, Show, User
 from ..payments_client import (
     PaymentsClient,
     PaymentsUnavailableError,
@@ -14,8 +21,10 @@ from ..payments_client import (
 from ..reviews_client import ReviewsClient, ReviewsUnavailableError, get_reviews_client
 from ..schemas import (
     BookingStatus,
+    MediaKind,
     MemberPaymentStatus,
     ReviewOut,
+    ReviewPhotoOut,
     ReviewSubmitIn,
     ReviewsPageOut,
 )
@@ -35,12 +44,57 @@ def _clamp_paging(page: int, page_size: int) -> tuple[int, int]:
     return max(page, 1), min(max(page_size, 1), PAGE_SIZE_MAX)
 
 
+def _review_photos(
+    review_ids: list[int],
+    db: Session,
+    storage: StorageBackend,
+    settings: MediaSettings,
+) -> dict[int, ReviewPhotoOut]:
+    """Each review's current photo, but only while its stored bytes still match.
+
+    The digest is never trusted from the row: the bytes on disk are re-hashed through
+    `integrity_for` on every read, so a photo whose file changed after upload is left
+    out and the review card renders no photo at all.
+    """
+    if not review_ids:
+        return {}
+
+    photos: dict[int, ReviewPhotoOut] = {}
+    for asset in db.scalars(
+        select(MediaAsset).where(
+            MediaAsset.review_id.in_(review_ids),
+            MediaAsset.kind == MediaKind.REVIEW_PHOTO.value,
+            MediaAsset.is_current.is_(True),
+        )
+    ):
+        if asset.review_id is None:
+            continue
+        integrity = integrity_for(
+            storage=storage,
+            storage_key=asset.storage_key,
+            recorded_sha256=asset.sha256,
+            size_bytes=asset.size_bytes,
+            algorithm=settings.hash_algorithm,
+        )
+        if not integrity.verified:
+            continue
+        photos[asset.review_id] = ReviewPhotoOut(
+            assetId=asset.id,
+            sha256=integrity.sha256,
+            verified=integrity.verified,
+        )
+    return photos
+
+
 @router.get("/{movie_id}/reviews", response_model=ReviewsPageOut)
 def list_movie_reviews(
     movie_id: int,
     page: int = 1,
     pageSize: int = PAGE_SIZE_DEFAULT,
     client: ReviewsClient = Depends(get_reviews_client),
+    db: Session = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage_backend),
+    settings: MediaSettings = Depends(get_media_settings),
 ) -> ReviewsPageOut:
     """Read a movie's reviews and summary; the ratings service owns the data."""
     safe_page, safe_page_size = _clamp_paging(page, pageSize)
@@ -53,7 +107,21 @@ def list_movie_reviews(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=REVIEWS_UNAVAILABLE_DETAIL,
         ) from None
-    return ReviewsPageOut.model_validate(body)
+
+    page_body = ReviewsPageOut.model_validate(body)
+    # Photos live in this service's MediaAsset rows, not in the ratings answer, so each
+    # review's photo is joined here: absent, superseded or tampered all read as None.
+    photos = _review_photos(
+        [review.id for review in page_body.reviews], db, storage, settings
+    )
+    return page_body.model_copy(
+        update={
+            "reviews": [
+                review.model_copy(update={"photo": photos.get(review.id)})
+                for review in page_body.reviews
+            ]
+        }
+    )
 
 
 def _review_forbidden() -> HTTPException:

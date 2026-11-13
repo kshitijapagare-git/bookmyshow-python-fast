@@ -369,19 +369,28 @@ class EventDelivery(Base):
 
 
 class MediaAsset(Base):
-    """One uploaded file for a movie's media kind, keyed by its content hash."""
+    """One uploaded file for a movie's media kind or a review's photo, keyed by its hash.
+
+    A movie's asset carries `movie_id` and no `review_id`; a review photo carries
+    `review_id` and no `movie_id`. `review_id` is an indexed cross-service reference,
+    not a foreign key: review rows are owned by the external ratings service, so there
+    is no local table to point at.
+    """
 
     __tablename__ = "media_assets"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('POSTER','BACKDROP','TRAILER')",
+            "kind IN ('POSTER','BACKDROP','TRAILER','REVIEW_PHOTO')",
             name="ck_media_assets_kind",
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    movie_id: Mapped[int] = mapped_column(
-        ForeignKey("movies.id"), nullable=False, index=True
+    movie_id: Mapped[int | None] = mapped_column(
+        ForeignKey("movies.id"), nullable=True, index=True
+    )
+    review_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
     )
     kind: Mapped[str] = mapped_column(String, nullable=False)
     storage_key: Mapped[str] = mapped_column(String, nullable=False)

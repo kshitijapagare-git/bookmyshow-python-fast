@@ -24,6 +24,7 @@ from ..media import (
     StorageBackend,
     get_media_settings,
     get_storage_backend,
+    max_bytes_for,
 )
 from ..models import Cinema, City, MediaAsset, Movie, Screen, Show
 from ..schemas import MediaAssetOut, MediaKind, MovieOut, MovieSummaryOut
@@ -38,7 +39,6 @@ from ..timeutil import today_ist, utc_from_ist
 router = APIRouter(prefix="/api/movies", tags=["movies"])
 
 UPCOMING_SHOW_DAYS = 7
-IMAGE_KINDS = (MediaKind.POSTER, MediaKind.BACKDROP)
 ACCEPT_RANGES = "bytes"
 RANGE_NOT_SATISFIABLE_DETAIL = "Range not satisfiable"
 
@@ -119,10 +119,8 @@ def get_movie(movie_id: int, db: Session = Depends(get_db)):
 
 
 def _max_bytes_for(kind: MediaKind, settings: MediaSettings) -> int:
-    """The configured byte limit: the image one for posters and backdrops, else video."""
-    if kind in IMAGE_KINDS:
-        return settings.max_image_bytes
-    return settings.max_video_bytes
+    """The configured byte limit, as the shared image/video rule in app.media decides."""
+    return max_bytes_for(kind, settings)
 
 
 def trailer_endpoint_url(movie_id: int) -> str:

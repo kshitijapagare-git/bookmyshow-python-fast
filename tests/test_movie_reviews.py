@@ -55,6 +55,7 @@ REVIEW_KEYS = {
     "verified",
     "status",
     "createdAt",
+    "photo",
 }
 BOOKINGS_URL = "/api/bookings"
 PAYMENT_ID = 11

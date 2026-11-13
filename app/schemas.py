@@ -104,6 +104,7 @@ class MediaKind(str, Enum):
     POSTER = "POSTER"
     BACKDROP = "BACKDROP"
     TRAILER = "TRAILER"
+    REVIEW_PHOTO = "REVIEW_PHOTO"
 
 
 class MediaAssetOut(BaseModel):
@@ -113,6 +114,28 @@ class MediaAssetOut(BaseModel):
     size: int
     contentType: str
     sha256: str
+
+
+class MediaIntegrityOut(BaseModel):
+    """An asset's recorded digest and size, plus whether its stored bytes still match."""
+
+    sha256: str
+    size: int
+    verified: bool
+
+
+class MediaVerifyIn(BaseModel):
+    """A digest to check an asset's stored bytes against."""
+
+    sha256: Annotated[
+        str, StringConstraints(strip_whitespace=True, pattern=r"^[0-9a-fA-F]{64}$")
+    ]
+
+
+class MediaVerifyOut(BaseModel):
+    """Whether the submitted digest matched the bytes now in storage."""
+
+    match: bool
 
 
 class Availability(str, Enum):
@@ -448,6 +471,14 @@ class ReviewsSummaryOut(BaseModel):
     distribution: dict[str, int]
 
 
+class ReviewPhotoOut(BaseModel):
+    """A review's photo: its asset id and the digest storage was checked against."""
+
+    assetId: int
+    sha256: str
+    verified: bool
+
+
 class ReviewOut(BaseModel):
     id: int
     movieId: int
@@ -459,6 +490,7 @@ class ReviewOut(BaseModel):
     verified: bool = False
     status: str = "ACTIVE"
     createdAt: datetime
+    photo: ReviewPhotoOut | None = None
 
 
 class ReviewsPageOut(BaseModel):
