@@ -39,6 +39,10 @@ router = APIRouter(prefix="/api/movies", tags=["movies"])
 
 UPCOMING_SHOW_DAYS = 7
 IMAGE_KINDS = (MediaKind.POSTER, MediaKind.BACKDROP)
+# A review photo is uploaded through its own route; this one only stores movie assets.
+MOVIE_UPLOAD_KINDS = frozenset(
+    {MediaKind.POSTER, MediaKind.BACKDROP, MediaKind.TRAILER}
+)
 ACCEPT_RANGES = "bytes"
 RANGE_NOT_SATISFIABLE_DETAIL = "Range not satisfiable"
 
@@ -193,6 +197,14 @@ async def upload_movie_media(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Movie not found: {movie_id}",
+        )
+
+    # A REVIEW_PHOTO is not a movie asset: storing one here would overwrite the
+    # movie's trailer url, so the kind is refused before any bytes are written.
+    if kind not in MOVIE_UPLOAD_KINDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"{kind.value} is not a movie media kind",
         )
 
     declared = (file.content_type or "").split(";")[0].strip().lower()

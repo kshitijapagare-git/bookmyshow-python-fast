@@ -1,4 +1,4 @@
-"""Storage for a movie's poster, backdrop and trailer uploads.
+"""Storage for uploaded media: movie posters, backdrops, trailers and review photos.
 
 The bytes go through one `StorageBackend`, so the router never touches a filesystem
 or an SDK directly: `LocalStorageBackend` streams the upload in `CHUNK_SIZE` chunks
@@ -7,18 +7,23 @@ as they go, and only then `os.replace`s the temp file into its final, content-ad
 key. Saving the same bytes twice therefore lands on the same key, and an oversized or
 empty upload leaves nothing behind at all.
 
-`MediaSettings.from_env()` reads the five knobs with the same fall-back-not-raise
-convention as `PaymentsSettings` and `ReviewsSettings`: an absent, blank or unparseable
-value selects the default instead of raising.
+`MediaSettings.from_env()` reads the six knobs -- the hash algorithm included -- with the
+same fall-back-not-raise convention as `PaymentsSettings` and `ReviewsSettings`: an
+absent, blank or unparseable value selects the default instead of raising.
+
+`integrity_report` is the read-back seam for the integrity and verify routes: it streams
+the stored object through `digest_of_file` and compares the result in constant time with
+the digest recorded at upload, so a file replaced on disk reads as untrusted.
 """
 
 import hashlib
 import logging
 import os
+import secrets
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from fastapi import Request, UploadFile
 
@@ -31,6 +36,8 @@ DEFAULT_UPLOAD_DIR = "media"
 DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024
 DEFAULT_MEDIA_SERVICE_TOKEN = "dev-service-token"
+DEFAULT_HASH_ALGORITHM = "sha256"
+SUPPORTED_HASH_ALGORITHMS: frozenset[str] = frozenset({DEFAULT_HASH_ALGORITHM})
 
 CHUNK_SIZE = 1024 * 1024
 MEDIA_URL_PREFIX = "/media"
@@ -40,6 +47,7 @@ KIND_SUBDIRS: dict[MediaKind, str] = {
     MediaKind.POSTER: "posters",
     MediaKind.BACKDROP: "backdrops",
     MediaKind.TRAILER: "trailers",
+    MediaKind.REVIEW_PHOTO: "review-photos",
 }
 
 ALLOWED_CONTENT_TYPES: dict[MediaKind, dict[str, str]] = {
@@ -56,7 +64,18 @@ ALLOWED_CONTENT_TYPES: dict[MediaKind, dict[str, str]] = {
     MediaKind.TRAILER: {
         "video/mp4": ".mp4",
     },
+    MediaKind.REVIEW_PHOTO: {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    },
 }
+
+IMAGE_KINDS: tuple[MediaKind, ...] = (
+    MediaKind.POSTER,
+    MediaKind.BACKDROP,
+    MediaKind.REVIEW_PHOTO,
+)
 
 
 def _env(name: str, default: str) -> str:
@@ -76,6 +95,37 @@ def _positive_int(name: str, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def new_hasher(algorithm: str) -> Any:
+    """A hashlib digest for `algorithm`; an unsupported name falls back to sha256.
+
+    Only sha256 is supported, and the recorded column is `sha256`, so anything else
+    warns and hashes with sha256 rather than writing a different digest under that name.
+    """
+    if algorithm not in SUPPORTED_HASH_ALGORITHMS:
+        logger.warning(
+            "unsupported MEDIA_HASH_ALGORITHM %r, using %r",
+            algorithm,
+            DEFAULT_HASH_ALGORITHM,
+        )
+    return hashlib.sha256()
+
+
+def digest_of_file(
+    *, path: Path, algorithm: str, chunk_size: int = CHUNK_SIZE
+) -> tuple[str, int]:
+    """Stream `path` through `algorithm`, answering its hex digest and byte count."""
+    digest = new_hasher(algorithm)
+    size = 0
+    with path.open("rb") as source:
+        while True:
+            chunk = source.read(chunk_size)
+            if not chunk:
+                break
+            size += len(chunk)
+            digest.update(chunk)
+    return digest.hexdigest(), size
+
+
 @dataclass(frozen=True)
 class MediaSettings:
     """Where uploads are stored, how large each kind may be and who may post them."""
@@ -85,10 +135,12 @@ class MediaSettings:
     max_image_bytes: int
     max_video_bytes: int
     service_token: str
+    hash_algorithm: str = DEFAULT_HASH_ALGORITHM
 
     @classmethod
     def from_env(cls) -> "MediaSettings":
         """The configured settings; anything unrecognised falls back, never raises."""
+        configured = _env("MEDIA_HASH_ALGORITHM", "").lower()
         return cls(
             storage_backend=_env(
                 "MEDIA_STORAGE_BACKEND", DEFAULT_STORAGE_BACKEND
@@ -101,7 +153,19 @@ class MediaSettings:
                 "MEDIA_MAX_VIDEO_BYTES", DEFAULT_MAX_VIDEO_BYTES
             ),
             service_token=_env("MEDIA_SERVICE_TOKEN", DEFAULT_MEDIA_SERVICE_TOKEN),
+            hash_algorithm=(
+                configured
+                if configured in SUPPORTED_HASH_ALGORITHMS
+                else DEFAULT_HASH_ALGORITHM
+            ),
         )
+
+
+def max_bytes_for(kind: MediaKind, settings: MediaSettings) -> int:
+    """The configured byte limit: the image one for image kinds, else the video one."""
+    if kind in IMAGE_KINDS:
+        return settings.max_image_bytes
+    return settings.max_video_bytes
 
 
 class MediaTooLargeError(Exception):
@@ -131,6 +195,21 @@ class StoredObject:
     key: str
     size: int
     sha256: str
+
+
+@dataclass(frozen=True)
+class IntegrityResult:
+    """One integrity read: the values recorded at upload and the ones recomputed now.
+
+    `sha256` and `size` are what the `MediaAsset` row says it stored; `recomputed_*`
+    are what the bytes on disk hash to right now, and are None when the object is gone.
+    """
+
+    sha256: str
+    size: int
+    verified: bool
+    recomputed_sha256: str | None
+    recomputed_size: int | None
 
 
 def object_key(*, kind: MediaKind, content_type: str, sha256: str) -> str:
@@ -188,7 +267,7 @@ class LocalStorageBackend:
         destination_dir.mkdir(parents=True, exist_ok=True)
         part_path = destination_dir / f"{uuid.uuid4().hex}{PART_SUFFIX}"
 
-        digest = hashlib.sha256()
+        digest = new_hasher(self.settings.hash_algorithm)
         size = 0
         try:
             with part_path.open("wb") as sink:
@@ -213,6 +292,39 @@ class LocalStorageBackend:
             raise
 
         return StoredObject(key=key, size=size, sha256=sha256)
+
+
+def integrity_report(
+    *,
+    storage: StorageBackend,
+    storage_key: str,
+    expected_sha256: str,
+    expected_size: int,
+    algorithm: str,
+) -> IntegrityResult:
+    """Recompute the stored object's digest and compare it with the recorded one.
+
+    A missing stored object is not an error: it is exactly the untrusted state this
+    report exists to describe, so it answers verified=False with no recomputed digest.
+    """
+    path = storage.path_for(storage_key)
+    if not path.is_file():
+        return IntegrityResult(
+            sha256=expected_sha256,
+            size=expected_size,
+            verified=False,
+            recomputed_sha256=None,
+            recomputed_size=None,
+        )
+
+    recomputed_sha256, recomputed_size = digest_of_file(path=path, algorithm=algorithm)
+    return IntegrityResult(
+        sha256=expected_sha256,
+        size=expected_size,
+        verified=secrets.compare_digest(recomputed_sha256, expected_sha256),
+        recomputed_sha256=recomputed_sha256,
+        recomputed_size=recomputed_size,
+    )
 
 
 def build_storage_backend(settings: MediaSettings) -> StorageBackend:
