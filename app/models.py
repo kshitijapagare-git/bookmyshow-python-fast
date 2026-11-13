@@ -369,12 +369,12 @@ class EventDelivery(Base):
 
 
 class MediaAsset(Base):
-    """One uploaded file for a movie's media kind, keyed by its content hash."""
+    """One uploaded file for a media kind, keyed by its content hash."""
 
     __tablename__ = "media_assets"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('POSTER','BACKDROP','TRAILER')",
+            "kind IN ('POSTER','BACKDROP','TRAILER','REVIEW_PHOTO')",
             name="ck_media_assets_kind",
         ),
     )
@@ -383,6 +383,10 @@ class MediaAsset(Base):
     movie_id: Mapped[int] = mapped_column(
         ForeignKey("movies.id"), nullable=False, index=True
     )
+    # A review lives in the ratings service, so this is its id with no local foreign key.
+    review_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, index=True
+    )
     kind: Mapped[str] = mapped_column(String, nullable=False)
     storage_key: Mapped[str] = mapped_column(String, nullable=False)
     url: Mapped[str] = mapped_column(String, nullable=False)
@@ -390,6 +394,7 @@ class MediaAsset(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

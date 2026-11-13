@@ -24,6 +24,7 @@ browser are interchangeable.
 """
 
 import base64
+import hashlib
 import json
 import secrets
 import shutil
@@ -38,6 +39,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.crypto.config import (
     ENCRYPTED_CONTENT_TYPE,
@@ -62,7 +64,7 @@ from app.crypto.middleware import (
 )
 from app.db import Base, SessionLocal, engine
 from app.main import create_app
-from app.models import User
+from app.models import MediaAsset, User
 from app.security import issue_token
 from seed import seed_data
 
@@ -76,6 +78,13 @@ OTP_REQUEST_URL = "/api/auth/otp/request"
 OTP_PAYLOAD = {"countryCode": "+91", "phone": "9876543210"}
 UNWRAP_DETAIL = "Request could not be decrypted"
 AES_KEY_BYTES = 32
+REVIEW_PHOTO_URL = "/api/movies/{movie_id}/reviews/{review_id}/photo"
+INTEGRITY_URL = "/api/media/{asset_id}/integrity"
+VERIFY_URL = "/api/media/{asset_id}/verify"
+MEDIA_MOVIE_ID = 1
+REVIEW_ID = 501
+VERIFIED_REVIEW_ID = 502
+PHOTO_PAYLOAD = b"\x89PNG\r\n\x1a\nreview-photo-bytes"
 
 
 def _b64url_uint(value: str) -> int:
@@ -538,6 +547,109 @@ def test_crypto_endpoints_stay_public(encrypted_client: TestClient) -> None:
     assert set(session_body) == {"sessionId", "expiresInSeconds"}
     assert session_body["sessionId"]
     assert session_body["expiresInSeconds"] == SESSION_TTL_SECONDS == 1800
+
+
+def test_review_photo_upload_is_plain_multipart_under_encryption(
+    encrypted_client: TestClient,
+) -> None:
+    """The review-photo multipart upload keeps its own carve-out beside the media one."""
+    session_id, aes_key = handshake(encrypted_client)
+    _, token = _user_token(phone="+919876543220")
+    url = REVIEW_PHOTO_URL.format(movie_id=MEDIA_MOVIE_ID, review_id=REVIEW_ID)
+
+    uploaded = encrypted_client.post(
+        url,
+        files={"file": ("photo", PHOTO_PAYLOAD, "image/png")},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert uploaded.status_code == 201
+    assert uploaded.headers["content-type"].startswith("application/json")
+    body = uploaded.json()
+    assert set(body) == {"url", "sha256", "verified"}
+    assert body["sha256"] == hashlib.sha256(PHOTO_PAYLOAD).hexdigest()
+    assert body["verified"] is True
+
+    # The /media mount is an ordinary route, so its bytes come back encrypted too.
+    served = _send(encrypted_client, "GET", body["url"], _session_headers(session_id))
+
+    assert served.status_code == 200
+    assert served.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    stored = open_envelope(
+        key=aes_key,
+        envelope=Envelope.model_validate(served.json()),
+        aad=response_aad(status_code=200, request_iv=""),
+    )
+    assert stored == PHOTO_PAYLOAD
+
+
+def test_integrity_and_verify_round_trip_through_an_encrypted_session(
+    encrypted_client: TestClient,
+) -> None:
+    """Both JSON routes stay encrypted: no public carve-out, and a plain body is a 415."""
+    session_id, aes_key = handshake(encrypted_client)
+    _, token = _user_token(phone="+919876543221")
+    auth = {"Authorization": f"Bearer {token}"}
+
+    uploaded = encrypted_client.post(
+        REVIEW_PHOTO_URL.format(movie_id=MEDIA_MOVIE_ID, review_id=VERIFIED_REVIEW_ID),
+        files={"file": ("photo", PHOTO_PAYLOAD, "image/png")},
+        headers=auth,
+    )
+    assert uploaded.status_code == 201
+    digest = uploaded.json()["sha256"]
+
+    with SessionLocal() as db:
+        asset = db.scalar(
+            select(MediaAsset)
+            .where(
+                MediaAsset.review_id == VERIFIED_REVIEW_ID,
+                MediaAsset.kind == "REVIEW_PHOTO",
+            )
+            .order_by(MediaAsset.id.desc())
+        )
+        assert asset is not None
+        asset_id = asset.id
+
+    integrity_url = INTEGRITY_URL.format(asset_id=asset_id)
+    integrity = _send(
+        encrypted_client,
+        "GET",
+        integrity_url,
+        {**_session_headers(session_id), **auth},
+    )
+
+    assert integrity.status_code == 200
+    assert integrity.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    integrity_body = open_response(aes_key, 200, "", integrity.json())
+    assert integrity_body == {
+        "sha256": digest,
+        "size": len(PHOTO_PAYLOAD),
+        "verified": True,
+    }
+
+    verify_url = VERIFY_URL.format(asset_id=asset_id)
+    headers, envelope = seal_request(
+        encrypted_client, session_id, aes_key, "POST", verify_url, {"sha256": digest}
+    )
+    headers.update(auth)
+    verified = _send(encrypted_client, "POST", verify_url, headers, envelope)
+
+    assert verified.status_code == 200
+    assert verified.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    assert open_response(aes_key, 200, envelope["iv"], verified.json()) == {
+        "match": True
+    }
+
+    plain = encrypted_client.post(verify_url, json={"sha256": digest}, headers=auth)
+
+    assert plain.status_code == 415
+    problem = plain.json()
+    assert set(problem) == PROBLEM_DETAIL_KEYS
+    assert problem["title"] == "Unsupported Media Type"
+    assert problem["status"] == 415
+    assert problem["detail"] == PLAIN_BODY_DETAIL
+    assert problem["instance"] == verify_url
 
 
 def test_wrapped_key_from_the_webcrypto_fixture_opens_a_session(

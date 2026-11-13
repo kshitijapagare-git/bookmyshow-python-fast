@@ -7,7 +7,9 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     StringConstraints,
+    model_serializer,
     model_validator,
 )
 
@@ -104,6 +106,7 @@ class MediaKind(str, Enum):
     POSTER = "POSTER"
     BACKDROP = "BACKDROP"
     TRAILER = "TRAILER"
+    REVIEW_PHOTO = "REVIEW_PHOTO"
 
 
 class MediaAssetOut(BaseModel):
@@ -113,6 +116,40 @@ class MediaAssetOut(BaseModel):
     size: int
     contentType: str
     sha256: str
+
+
+class ReviewPhotoOut(BaseModel):
+    """A review's photo: where it is served, its upload digest and its trust state."""
+
+    url: str
+    sha256: str
+    verified: bool
+
+
+Sha256Hex = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, to_lower=True, pattern=r"^[0-9a-f]{64}$"),
+]
+
+
+class MediaIntegrityOut(BaseModel):
+    """One asset's stored digest and size, plus whether storage still matches them."""
+
+    sha256: str
+    size: int
+    verified: bool
+
+
+class MediaVerifyIn(BaseModel):
+    """The digest a moderator is comparing a stored asset against."""
+
+    sha256: Sha256Hex
+
+
+class MediaVerifyOut(BaseModel):
+    """Whether the submitted digest names the bytes storage holds right now."""
+
+    match: bool
 
 
 class Availability(str, Enum):
@@ -459,6 +496,21 @@ class ReviewOut(BaseModel):
     verified: bool = False
     status: str = "ACTIVE"
     createdAt: datetime
+    photo: ReviewPhotoOut | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_missing_photo(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        """Drop only the photo key when there is no trusted photo.
+
+        `response_model_exclude_none` would also drop `bookingId` and `groupId`, which
+        clients read as nulls, so exactly one key is removed here.
+        """
+        data = handler(self)
+        if data.get("photo") is None:
+            data.pop("photo", None)
+        return data
 
 
 class ReviewsPageOut(BaseModel):
