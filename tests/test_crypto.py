@@ -85,6 +85,10 @@ MEDIA_MOVIE_ID = 1
 REVIEW_ID = 501
 VERIFIED_REVIEW_ID = 502
 PHOTO_PAYLOAD = b"\x89PNG\r\n\x1a\nreview-photo-bytes"
+PRESIGN_URL = "/api/media/presign"
+PRESIGNED_UPLOAD_URL = "/api/media/{asset_id}/upload"
+COMPLETE_URL = "/api/media/{asset_id}/complete"
+AVATAR_PAYLOAD = b"\x89PNG\r\n\x1a\navatar-photo-bytes"
 
 
 def _b64url_uint(value: str) -> int:
@@ -650,6 +654,169 @@ def test_integrity_and_verify_round_trip_through_an_encrypted_session(
     assert problem["status"] == 415
     assert problem["detail"] == PLAIN_BODY_DETAIL
     assert problem["instance"] == verify_url
+
+
+def test_presign_upload_and_complete_round_trip_under_encryption(
+    encrypted_client: TestClient,
+) -> None:
+    """The direct-to-storage flow: both JSON steps encrypted, the raw PUT carved out."""
+    session_id, aes_key = handshake(encrypted_client)
+    _, token = _user_token(phone="+919876543222")
+    auth = {"Authorization": f"Bearer {token}"}
+    size = len(AVATAR_PAYLOAD)
+
+    headers, envelope = seal_request(
+        encrypted_client,
+        session_id,
+        aes_key,
+        "POST",
+        PRESIGN_URL,
+        {
+            "purpose": "avatar",
+            "filename": "avatar.png",
+            "contentType": "image/png",
+            "size": size,
+        },
+    )
+    headers.update(auth)
+    presigned = _send(encrypted_client, "POST", PRESIGN_URL, headers, envelope)
+
+    assert presigned.status_code == 200
+    assert presigned.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    presign_body = open_response(aes_key, 200, envelope["iv"], presigned.json())
+    assert set(presign_body) == {
+        "assetId",
+        "uploadUrl",
+        "method",
+        "expiresIn",
+        "headers",
+    }
+    assert presign_body["method"] == "PUT"
+    assert presign_body["headers"] == {"Content-Type": "image/png"}
+    asset_id = presign_body["assetId"]
+    upload_path = PRESIGNED_UPLOAD_URL.format(asset_id=asset_id)
+    assert presign_body["uploadUrl"].startswith(f"{upload_path}?token=")
+
+    # The PUT carries raw image bytes on the carved-out path: no encryption session,
+    # no envelope, and a 204 with no body to encrypt.
+    uploaded = encrypted_client.put(
+        presign_body["uploadUrl"],
+        content=AVATAR_PAYLOAD,
+        headers={"Content-Type": "image/png"},
+    )
+
+    assert uploaded.status_code == 204
+    assert uploaded.content == b""
+
+    completed = _send(
+        encrypted_client,
+        "POST",
+        COMPLETE_URL.format(asset_id=asset_id),
+        {**_session_headers(session_id), **auth},
+    )
+
+    assert completed.status_code == 200
+    assert completed.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    complete_body = open_response(aes_key, 200, "", completed.json())
+    assert set(complete_body) == {
+        "assetId",
+        "url",
+        "sha256",
+        "size",
+        "contentType",
+        "kind",
+        "verified",
+    }
+    assert complete_body["assetId"] == asset_id
+    assert complete_body["kind"] == "AVATAR"
+    assert complete_body["verified"] is True
+    assert complete_body["contentType"] == "image/png"
+    assert complete_body["size"] == size
+    assert complete_body["sha256"] == hashlib.sha256(AVATAR_PAYLOAD).hexdigest()
+
+    # A used link is refused, and the refusal is plain because the path is carved out.
+    replayed = encrypted_client.put(
+        presign_body["uploadUrl"],
+        content=AVATAR_PAYLOAD,
+        headers={"Content-Type": "image/png"},
+    )
+
+    assert replayed.status_code == 403
+    replayed_body = replayed.json()
+    assert set(replayed_body) == PROBLEM_DETAIL_KEYS
+    assert replayed_body["type"] == "about:blank"
+    assert replayed_body["status"] == 403
+    assert replayed_body["instance"] == upload_path
+
+    # Bytes that do not match the declared size are refused as a 422 ProblemDetail.
+    mismatch_headers, mismatch_envelope = seal_request(
+        encrypted_client,
+        session_id,
+        aes_key,
+        "POST",
+        PRESIGN_URL,
+        {
+            "purpose": "avatar",
+            "filename": "short.png",
+            "contentType": "image/png",
+            "size": size - 1,
+        },
+    )
+    mismatch_headers.update(auth)
+    mismatched = _send(
+        encrypted_client, "POST", PRESIGN_URL, mismatch_headers, mismatch_envelope
+    )
+    assert mismatched.status_code == 200
+    mismatched_body = open_response(
+        aes_key, 200, mismatch_envelope["iv"], mismatched.json()
+    )
+    mismatched_id = mismatched_body["assetId"]
+
+    too_long = encrypted_client.put(
+        mismatched_body["uploadUrl"],
+        content=AVATAR_PAYLOAD,
+        headers={"Content-Type": "image/png"},
+    )
+
+    assert too_long.status_code == 422
+    too_long_body = too_long.json()
+    assert set(too_long_body) == PROBLEM_DETAIL_KEYS
+    assert too_long_body["type"] == "about:blank"
+    assert too_long_body["status"] == 422
+    assert too_long_body["instance"] == PRESIGNED_UPLOAD_URL.format(
+        asset_id=mismatched_id
+    )
+
+    # The carve-out is narrowed by method: a GET on the same path stays encrypted and
+    # is refused for want of a session, exactly like every other /api route.
+    read_without_session = encrypted_client.get(upload_path)
+
+    assert read_without_session.status_code == 428
+    read_body = read_without_session.json()
+    assert set(read_body) == PROBLEM_DETAIL_KEYS
+    assert read_body["status"] == 428
+    assert read_body["detail"] == SESSION_DETAIL
+    assert read_body["instance"] == upload_path
+
+    # Presign itself is an ordinary JSON route: a plain body is the usual 415.
+    plain = encrypted_client.post(
+        PRESIGN_URL,
+        json={
+            "purpose": "avatar",
+            "filename": "avatar.png",
+            "contentType": "image/png",
+            "size": size,
+        },
+        headers=auth,
+    )
+
+    assert plain.status_code == 415
+    plain_body = plain.json()
+    assert set(plain_body) == PROBLEM_DETAIL_KEYS
+    assert plain_body["title"] == "Unsupported Media Type"
+    assert plain_body["status"] == 415
+    assert plain_body["detail"] == PLAIN_BODY_DETAIL
+    assert plain_body["instance"] == PRESIGN_URL
 
 
 def test_wrapped_key_from_the_webcrypto_fixture_opens_a_session(

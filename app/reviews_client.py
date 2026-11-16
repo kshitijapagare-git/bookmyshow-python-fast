@@ -18,6 +18,10 @@ DEFAULT_REVIEWS_SERVICE_URL = "http://localhost:8002"
 DEFAULT_REVIEWS_SERVICE_TOKEN = "dev-service-token"
 DEFAULT_TIMEOUT_SECONDS = 5.0
 ATTEMPTS = 2  # the first try plus exactly one retry; the reads and the upsert are safe
+# The service only lists reviews movie by movie, so one review is found by walking the
+# listing: the biggest page it accepts, for a bounded number of pages.
+REVIEW_LOOKUP_PAGE_SIZE = 50
+REVIEW_LOOKUP_MAX_PAGES = 20
 
 
 @dataclass(frozen=True)
@@ -119,6 +123,55 @@ class ReviewsClient:
             return _as_object(_body(response))
 
         raise ReviewsUnavailableError(last_error)
+
+    def find_review(
+        self, *, movie_id: int, review_id: int
+    ) -> dict[str, object] | None:
+        """One review of a movie, or None when that movie has no such review.
+
+        The service offers the per-movie listing only, so the pages are walked until
+        the review turns up or a short page says the listing is exhausted. A review
+        that lives under another movie therefore reads as not found, which is what the
+        presign route needs to refuse an author it cannot prove.
+        """
+        headers = {"X-Service-Token": self.settings.service_token}
+
+        for page in range(1, REVIEW_LOOKUP_MAX_PAGES + 1):
+            url = (
+                f"{self.settings.base_url}/internal/reviews"
+                f"?movieId={movie_id}&page={page}&pageSize={REVIEW_LOOKUP_PAGE_SIZE}"
+            )
+            try:
+                response = httpx.get(
+                    url, headers=headers, timeout=self.settings.timeout_seconds
+                )
+            except httpx.HTTPError as exc:
+                logger.warning("reviews service review lookup error: %s", exc)
+                raise ReviewsUnavailableError(str(exc)) from None
+
+            if not 200 <= response.status_code < 300:
+                raise ReviewsUnavailableError(
+                    f"reviews service answered {response.status_code}"
+                )
+
+            rows = _as_object(_body(response)).get("reviews")
+            if not isinstance(rows, list):
+                raise ReviewsUnavailableError(
+                    "reviews service answered without a reviews list"
+                )
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ReviewsUnavailableError(
+                        "reviews service answered with a review that is not an object"
+                    )
+                if row.get("id") == review_id:
+                    return row
+
+            if len(rows) < REVIEW_LOOKUP_PAGE_SIZE:
+                return None
+
+        return None
 
     def list_booking_reviews(
         self, *, movie_id: int, booking_id: int

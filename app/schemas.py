@@ -107,6 +107,7 @@ class MediaKind(str, Enum):
     BACKDROP = "BACKDROP"
     TRAILER = "TRAILER"
     REVIEW_PHOTO = "REVIEW_PHOTO"
+    AVATAR = "AVATAR"
 
 
 class MediaAssetOut(BaseModel):
@@ -150,6 +151,60 @@ class MediaVerifyOut(BaseModel):
     """Whether the submitted digest names the bytes storage holds right now."""
 
     match: bool
+
+
+class MediaPurpose(str, Enum):
+    """What a direct-to-storage upload is for, in the ticket's lowercase spelling."""
+
+    AVATAR = "avatar"
+    REVIEW_PHOTO = "review_photo"
+
+
+class MediaPresignIn(BaseModel):
+    """A presign request: what to store, for whom, and the size the bytes will be."""
+
+    purpose: MediaPurpose
+    ownerId: int | None = Field(default=None, gt=0)
+    # A review lives in the ratings service, which can only be read movie by movie, so
+    # proving the caller wrote `ownerId` needs the movie the review belongs to.
+    movieId: int | None = None
+    filename: NonBlank
+    contentType: NonBlank
+    size: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _owner_matches_purpose(self) -> "MediaPresignIn":
+        """A review photo names its review and movie; an avatar names no owner at all."""
+        if self.purpose is MediaPurpose.REVIEW_PHOTO:
+            if self.ownerId is None:
+                raise ValueError("ownerId is required for purpose=review_photo")
+            if self.movieId is None:
+                raise ValueError("movieId is required for purpose=review_photo")
+        elif self.ownerId is not None:
+            raise ValueError("ownerId is not accepted for purpose=avatar")
+        return self
+
+
+class MediaPresignOut(BaseModel):
+    """The signed upload the client PUTs its bytes to, and what it must send with them."""
+
+    assetId: int
+    uploadUrl: str
+    method: str
+    expiresIn: int
+    headers: dict[str, str]
+
+
+class MediaCompleteOut(BaseModel):
+    """A finished direct upload: where it is served, its digest and its trust state."""
+
+    assetId: int
+    url: str
+    sha256: str
+    size: int
+    contentType: str
+    kind: MediaKind
+    verified: bool
 
 
 class Availability(str, Enum):

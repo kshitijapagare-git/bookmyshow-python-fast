@@ -23,6 +23,7 @@ from .sessions import Session, SessionStore
 PUBLIC_PATHS = frozenset({"/api/crypto/public-key", "/api/crypto/session"})
 MEDIA_UPLOAD_PATH = re.compile(r"^/api/movies/\d+/media$")
 REVIEW_PHOTO_UPLOAD_PATH = re.compile(r"^/api/movies/\d+/reviews/\d+/photo$")
+PRESIGNED_UPLOAD_PATH = re.compile(r"^/api/media/\d+/upload$")
 PLAIN_BODY_DETAIL = "Encrypted body required"
 DECRYPT_DETAIL = "Request could not be decrypted"
 SESSION_DETAIL = "Encryption session missing or expired"
@@ -68,6 +69,13 @@ def _is_review_photo_upload(scope: Scope) -> bool:
     if scope.get("type") != "http" or scope.get("method") != "POST":
         return False
     return REVIEW_PHOTO_UPLOAD_PATH.fullmatch(scope.get("path", "")) is not None
+
+
+def _is_presigned_upload(scope: Scope) -> bool:
+    """A presigned `PUT /api/media/{id}/upload`: raw bytes guarded by a signed token."""
+    if scope.get("type") != "http" or scope.get("method") != "PUT":
+        return False
+    return PRESIGNED_UPLOAD_PATH.fullmatch(scope.get("path", "")) is not None
 
 
 def _path_with_query(scope: Scope) -> str:
@@ -137,6 +145,14 @@ class CryptoMiddleware:
         if _is_media_upload(scope) or _is_review_photo_upload(scope):
             # A multipart upload: its body is a stream that must not be buffered, and
             # both routes carry their own token guard and answer plain JSON.
+            await self.app(scope, receive, send)
+            return
+
+        if _is_presigned_upload(scope):
+            # A presigned upload: the browser PUTs raw image bytes to a capability url,
+            # so the body is neither a JSON envelope nor something to buffer. The signed
+            # token is the guard, and the route answers plain JSON when it refuses.
+            # Narrowed by method, so a GET or POST to the same path stays encrypted.
             await self.app(scope, receive, send)
             return
 

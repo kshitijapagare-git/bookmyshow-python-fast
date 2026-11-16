@@ -374,14 +374,23 @@ class MediaAsset(Base):
     __tablename__ = "media_assets"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('POSTER','BACKDROP','TRAILER','REVIEW_PHOTO')",
+            "kind IN ('POSTER','BACKDROP','TRAILER','REVIEW_PHOTO','AVATAR')",
             name="ck_media_assets_kind",
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    movie_id: Mapped[int] = mapped_column(
-        ForeignKey("movies.id"), nullable=False, index=True
+    # An avatar belongs to a user rather than a movie, so the movie link is optional.
+    movie_id: Mapped[int | None] = mapped_column(
+        ForeignKey("movies.id"), nullable=True, index=True
+    )
+    # Who presigned the upload; the owner the complete route checks against.
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
+    # Metadata only: the storage key stays content-addressed, never the client's name.
+    original_filename: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
     )
     # A review lives in the ratings service, so this is its id with no local foreign key.
     review_id: Mapped[int | None] = mapped_column(
