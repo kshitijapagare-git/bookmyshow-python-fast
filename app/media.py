@@ -42,8 +42,9 @@ from .streaming import ByteRange, iter_file_range
 logger = logging.getLogger(__name__)
 
 DEFAULT_STORAGE_BACKEND = "local"
-# The one other backend name this app knows; every other name falls back to local.
+# The backend names this app knows; every other name falls back to local.
 S3_STORAGE_BACKEND = "s3"
+GCS_STORAGE_BACKEND = "gcs"
 DEFAULT_UPLOAD_DIR = "media"
 DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024
@@ -55,6 +56,7 @@ DEFAULT_MEDIA_PRESIGN_SECRET = "dev-presign-secret-change-me"
 DEFAULT_S3_REGION = "us-east-1"
 # An empty prefix keeps every object key at the bucket root.
 DEFAULT_S3_MEDIA_PREFIX = ""
+DEFAULT_GCS_MEDIA_PREFIX = ""
 SUPPORTED_SSE: frozenset[str] = frozenset({"AES256"})
 
 CHUNK_SIZE = 1024 * 1024
@@ -210,6 +212,14 @@ class MediaSettings:
     s3_secret_access_key: str = ""
     s3_media_prefix: str = DEFAULT_S3_MEDIA_PREFIX
     s3_sse: str | None = None
+    # Where the GCS backend stores objects; a blank bucket means GCS is not configured.
+    gcs_bucket: str = ""
+    # A blank project leaves it to whatever the resolved credentials name.
+    gcs_project: str = ""
+    # The raw service-account document, and its fallback path; the JSON wins when set.
+    gcs_credentials_json: str = ""
+    gcs_credentials_path: str = ""
+    gcs_media_prefix: str = DEFAULT_GCS_MEDIA_PREFIX
 
     @classmethod
     def from_env(cls) -> "MediaSettings":
@@ -245,6 +255,13 @@ class MediaSettings:
                 _env("S3_MEDIA_PREFIX", DEFAULT_S3_MEDIA_PREFIX)
             ),
             s3_sse=_sse(_env("S3_SSE", "")),
+            gcs_bucket=_env("GCS_BUCKET", ""),
+            gcs_project=_env("GCS_PROJECT", ""),
+            gcs_credentials_json=_env("GCS_CREDENTIALS_JSON", ""),
+            gcs_credentials_path=_env("GOOGLE_APPLICATION_CREDENTIALS", ""),
+            gcs_media_prefix=_strip_slashes(
+                _env("GCS_MEDIA_PREFIX", DEFAULT_GCS_MEDIA_PREFIX)
+            ),
         )
 
 
@@ -666,8 +683,14 @@ def build_storage_backend(settings: MediaSettings) -> StorageBackend:
     a bucket. An s3 selection with no bucket is a configuration mistake rather than a
     usable backend -- it would fail every upload with a client parameter error -- so it
     warns and falls back to local, exactly as an unknown name does.
-    `app.s3_storage` imports the settings and helpers from this module, so it is
-    imported inside this function rather than at module level.
+    `MEDIA_STORAGE_BACKEND=gcs` selects the Google Cloud Storage backend the same way,
+    once `GCS_BUCKET` names a bucket, and falls back to local both when that bucket is
+    blank and when the client or its credentials cannot be resolved -- an unusable
+    configuration must be visible in the log rather than served silently from disk. The
+    client is memoised on the settings, so resolving it eagerly here is a cache hit for
+    every request after the first.
+    `app.s3_storage` and `app.gcs_storage` import the settings and helpers from this
+    module, so they are imported inside this function rather than at module level.
     """
     if settings.storage_backend == S3_STORAGE_BACKEND:
         if not settings.s3_bucket:
@@ -680,6 +703,33 @@ def build_storage_backend(settings: MediaSettings) -> StorageBackend:
         from .s3_storage import S3StorageBackend
 
         return S3StorageBackend(settings)
+
+    if settings.storage_backend == GCS_STORAGE_BACKEND:
+        if not settings.gcs_bucket:
+            logger.warning(
+                "MEDIA_STORAGE_BACKEND is %r but GCS_BUCKET is not set, using %r",
+                GCS_STORAGE_BACKEND,
+                DEFAULT_STORAGE_BACKEND,
+            )
+            return LocalStorageBackend(settings)
+        from .gcs_storage import GcsStorageBackend
+
+        backend = GcsStorageBackend(settings)
+        try:
+            # Resolving the client is where an unusable credentials document or path
+            # surfaces, and that is a deployment mistake rather than a usable backend.
+            _ = backend.client
+        except Exception as error:
+            logger.warning(
+                "MEDIA_STORAGE_BACKEND is %r but the GCS client for %r is unusable "
+                "(%s), using %r",
+                GCS_STORAGE_BACKEND,
+                settings.gcs_bucket,
+                error,
+                DEFAULT_STORAGE_BACKEND,
+            )
+            return LocalStorageBackend(settings)
+        return backend
 
     if settings.storage_backend != DEFAULT_STORAGE_BACKEND:
         logger.warning(
