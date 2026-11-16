@@ -7,9 +7,13 @@ as they go, and only then `os.replace`s the temp file into its final, content-ad
 key. Saving the same bytes twice therefore lands on the same key, and an oversized or
 empty upload leaves nothing behind at all.
 
-`MediaSettings.from_env()` reads the six knobs -- the hash algorithm included -- with the
-same fall-back-not-raise convention as `PaymentsSettings` and `ReviewsSettings`: an
-absent, blank or unparseable value selects the default instead of raising.
+`save_exact` is the direct-upload path: the same temp-file mechanics, but it stores
+the body only when its byte count is exactly the size the client declared at presign.
+
+`MediaSettings.from_env()` reads the configured knobs -- the hash algorithm and the
+presign secret and lifetime included -- with the same fall-back-not-raise convention as
+`PaymentsSettings` and `ReviewsSettings`: an absent, blank or unparseable value selects
+the default instead of raising.
 
 `integrity_report` is the read-back seam for the integrity and verify routes: it streams
 the stored object through `digest_of_file` and compares the result in constant time with
@@ -21,6 +25,7 @@ import logging
 import os
 import secrets
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -38,6 +43,8 @@ DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024
 DEFAULT_MEDIA_SERVICE_TOKEN = "dev-service-token"
 DEFAULT_HASH_ALGORITHM = "sha256"
 SUPPORTED_HASH_ALGORITHMS: frozenset[str] = frozenset({DEFAULT_HASH_ALGORITHM})
+DEFAULT_MEDIA_PRESIGN_EXPIRES_SECONDS = 900
+DEFAULT_MEDIA_PRESIGN_SECRET = "dev-presign-secret-change-me"
 
 CHUNK_SIZE = 1024 * 1024
 MEDIA_URL_PREFIX = "/media"
@@ -48,6 +55,7 @@ KIND_SUBDIRS: dict[MediaKind, str] = {
     MediaKind.BACKDROP: "backdrops",
     MediaKind.TRAILER: "trailers",
     MediaKind.REVIEW_PHOTO: "review-photos",
+    MediaKind.AVATAR: "avatars",
 }
 
 ALLOWED_CONTENT_TYPES: dict[MediaKind, dict[str, str]] = {
@@ -69,12 +77,18 @@ ALLOWED_CONTENT_TYPES: dict[MediaKind, dict[str, str]] = {
         "image/png": ".png",
         "image/webp": ".webp",
     },
+    MediaKind.AVATAR: {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    },
 }
 
 IMAGE_KINDS: tuple[MediaKind, ...] = (
     MediaKind.POSTER,
     MediaKind.BACKDROP,
     MediaKind.REVIEW_PHOTO,
+    MediaKind.AVATAR,
 )
 
 
@@ -136,6 +150,8 @@ class MediaSettings:
     max_video_bytes: int
     service_token: str
     hash_algorithm: str = DEFAULT_HASH_ALGORITHM
+    presign_secret: str = DEFAULT_MEDIA_PRESIGN_SECRET
+    presign_expires_seconds: int = DEFAULT_MEDIA_PRESIGN_EXPIRES_SECONDS
 
     @classmethod
     def from_env(cls) -> "MediaSettings":
@@ -158,6 +174,10 @@ class MediaSettings:
                 if configured in SUPPORTED_HASH_ALGORITHMS
                 else DEFAULT_HASH_ALGORITHM
             ),
+            presign_secret=_env("MEDIA_PRESIGN_SECRET", DEFAULT_MEDIA_PRESIGN_SECRET),
+            presign_expires_seconds=_positive_int(
+                "MEDIA_PRESIGN_EXPIRES_SECONDS", DEFAULT_MEDIA_PRESIGN_EXPIRES_SECONDS
+            ),
         )
 
 
@@ -178,6 +198,17 @@ class MediaTooLargeError(Exception):
 
 class EmptyUploadError(Exception):
     """The upload carried no bytes at all."""
+
+
+class ExactSizeMismatchError(Exception):
+    """The body was not exactly the size declared at presign; the .part file is removed."""
+
+    def __init__(self, *, expected: int, actual: int) -> None:
+        super().__init__(
+            f"upload is {actual} bytes but {expected} bytes were declared"
+        )
+        self.expected = expected
+        self.actual = actual
 
 
 class UnsupportedMediaTypeError(Exception):
@@ -217,6 +248,50 @@ def object_key(*, kind: MediaKind, content_type: str, sha256: str) -> str:
     return f"{KIND_SUBDIRS[kind]}/{sha256}{ALLOWED_CONTENT_TYPES[kind][content_type]}"
 
 
+class ChunkSource(Protocol):
+    """The `read(size)` shape both save methods stream a body through."""
+
+    async def read(self, size: int = -1) -> bytes:
+        """The next slice of the body, or b"" once it is exhausted."""
+        ...
+
+
+class RequestStreamChunks:
+    """Adapts a request body iterator to the `read(size)` shape storage expects.
+
+    Only the unread remainder of the chunk already pulled is held, so a long body is
+    handed to storage in the chunks the server received it in rather than buffered
+    whole. A read answers at most the current remainder, as a stream may.
+    """
+
+    def __init__(self, stream: AsyncIterator[bytes]) -> None:
+        self._stream = stream
+        self._buffer = b""
+        self._exhausted = False
+
+    async def _fill(self) -> None:
+        """Pull the next chunk when nothing is buffered, remembering the end."""
+        while not self._exhausted and not self._buffer:
+            try:
+                self._buffer = await self._stream.__anext__()
+            except StopAsyncIteration:
+                self._exhausted = True
+                self._buffer = b""
+
+    async def read(self, size: int = -1) -> bytes:
+        """The next slice of the body, or b"" once it is exhausted."""
+        await self._fill()
+        if not self._buffer:
+            return b""
+        if size is None or size < 0:
+            chunk = self._buffer
+            self._buffer = b""
+            return chunk
+        chunk = self._buffer[:size]
+        self._buffer = self._buffer[size:]
+        return chunk
+
+
 class StorageBackend(Protocol):
     """The one seam between the upload route and wherever the bytes actually live."""
 
@@ -229,6 +304,17 @@ class StorageBackend(Protocol):
         max_bytes: int,
     ) -> StoredObject:
         """Stream `upload` into storage and answer the key, size and SHA-256 it got."""
+        ...
+
+    async def save_exact(
+        self,
+        *,
+        kind: MediaKind,
+        content_type: str,
+        upload: ChunkSource,
+        expected_size: int,
+    ) -> StoredObject:
+        """Store `upload` only when it is exactly `expected_size` bytes long."""
         ...
 
     def public_url(self, key: str) -> str:
@@ -282,6 +368,43 @@ class LocalStorageBackend:
                     sink.write(chunk)
             if size == 0:
                 raise EmptyUploadError()
+
+            sha256 = digest.hexdigest()
+            key = object_key(kind=kind, content_type=content_type, sha256=sha256)
+            os.replace(part_path, self.path_for(key))
+        except BaseException:
+            # A refused upload must leave neither a partial file nor a .part file.
+            part_path.unlink(missing_ok=True)
+            raise
+
+        return StoredObject(key=key, size=size, sha256=sha256)
+
+    async def save_exact(
+        self,
+        *,
+        kind: MediaKind,
+        content_type: str,
+        upload: ChunkSource,
+        expected_size: int,
+    ) -> StoredObject:
+        """Copy the body to a temp file and move it onto its key only at the exact size."""
+        destination_dir = Path(self.settings.upload_dir) / KIND_SUBDIRS[kind]
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        part_path = destination_dir / f"{uuid.uuid4().hex}{PART_SUFFIX}"
+
+        digest = new_hasher(self.settings.hash_algorithm)
+        size = 0
+        try:
+            with part_path.open("wb") as sink:
+                while True:
+                    chunk = await upload.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    digest.update(chunk)
+                    sink.write(chunk)
+            if size != expected_size:
+                raise ExactSizeMismatchError(expected=expected_size, actual=size)
 
             sha256 = digest.hexdigest()
             key = object_key(kind=kind, content_type=content_type, sha256=sha256)

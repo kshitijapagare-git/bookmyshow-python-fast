@@ -23,6 +23,7 @@ from .sessions import Session, SessionStore
 PUBLIC_PATHS = frozenset({"/api/crypto/public-key", "/api/crypto/session"})
 MEDIA_UPLOAD_PATH = re.compile(r"^/api/movies/\d+/media$")
 REVIEW_PHOTO_UPLOAD_PATH = re.compile(r"^/api/movies/\d+/reviews/\d+/photo$")
+PRESIGN_UPLOAD_PATH = re.compile(r"^/api/media/\d+/upload$")
 PLAIN_BODY_DETAIL = "Encrypted body required"
 DECRYPT_DETAIL = "Request could not be decrypted"
 SESSION_DETAIL = "Encryption session missing or expired"
@@ -68,6 +69,18 @@ def _is_review_photo_upload(scope: Scope) -> bool:
     if scope.get("type") != "http" or scope.get("method") != "POST":
         return False
     return REVIEW_PHOTO_UPLOAD_PATH.fullmatch(scope.get("path", "")) is not None
+
+
+def _is_presign_upload(scope: Scope) -> bool:
+    """A plain `PUT /api/media/{id}/upload`: the signed direct upload, no session.
+
+    The signed `token` in the query string is the authorization here, so the body is
+    raw bytes rather than an encrypted envelope. Only this one `PUT` is bypassed;
+    every other `/api/media` route stays encrypted.
+    """
+    if scope.get("type") != "http" or scope.get("method") != "PUT":
+        return False
+    return PRESIGN_UPLOAD_PATH.fullmatch(scope.get("path", "")) is not None
 
 
 def _path_with_query(scope: Scope) -> str:
@@ -134,9 +147,14 @@ class CryptoMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if _is_media_upload(scope) or _is_review_photo_upload(scope):
-            # A multipart upload: its body is a stream that must not be buffered, and
-            # both routes carry their own token guard and answer plain JSON.
+        if (
+            _is_media_upload(scope)
+            or _is_review_photo_upload(scope)
+            or _is_presign_upload(scope)
+        ):
+            # A multipart upload or the signed direct upload: its body is a stream that
+            # must not be buffered, and each route carries its own authorization and
+            # answers plain JSON.
             await self.app(scope, receive, send)
             return
 

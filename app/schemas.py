@@ -107,6 +107,7 @@ class MediaKind(str, Enum):
     BACKDROP = "BACKDROP"
     TRAILER = "TRAILER"
     REVIEW_PHOTO = "REVIEW_PHOTO"
+    AVATAR = "AVATAR"
 
 
 class MediaAssetOut(BaseModel):
@@ -116,6 +117,39 @@ class MediaAssetOut(BaseModel):
     size: int
     contentType: str
     sha256: str
+
+
+class MediaPurpose(str, Enum):
+    """What a presigned upload is for; the wire values are the ticket's own."""
+
+    AVATAR = "avatar"
+    REVIEW_PHOTO = "review_photo"
+
+
+class MediaPresignIn(BaseModel):
+    """What the client declares before uploading bytes straight to storage."""
+
+    purpose: MediaPurpose
+    ownerId: int | None = Field(default=None, gt=0)
+    filename: NonBlank
+    contentType: NonBlank
+    size: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _review_photo_needs_an_owner(self) -> "MediaPresignIn":
+        if self.purpose is MediaPurpose.REVIEW_PHOTO and self.ownerId is None:
+            raise ValueError("ownerId is required when purpose is review_photo")
+        return self
+
+
+class MediaPresignOut(BaseModel):
+    """Where to upload and what to send: the signed url plus its one header."""
+
+    assetId: int
+    uploadUrl: str
+    method: Literal["PUT"] = "PUT"
+    expiresIn: int
+    headers: dict[str, str]
 
 
 class ReviewPhotoOut(BaseModel):
