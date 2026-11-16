@@ -174,6 +174,13 @@ class MediaIntegrityOut(BaseModel):
     verified: bool
 
 
+class MediaStorageHealthOut(BaseModel):
+    """Which backend holds the uploaded bytes, and whether it answers right now."""
+
+    backend: str
+    reachable: bool
+
+
 class MediaVerifyIn(BaseModel):
     """The digest a moderator is comparing a stored asset against."""
 

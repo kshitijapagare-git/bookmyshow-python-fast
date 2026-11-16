@@ -209,3 +209,20 @@ def test_streaming_does_not_read_the_whole_object(client, monkeypatch) -> None:
 
     assert ranged.status_code == 206
     assert ranged.content == LARGE_PAYLOAD[:100]
+
+
+def test_range_slice_is_served_through_the_storage_seam(client) -> None:
+    """The 206 slice comes out of storage through the seam, never off a filesystem path."""
+    uploaded = _upload_trailer(client, MOVIE_ID, TRAILER_PAYLOAD)
+
+    assert uploaded.status_code == 201
+    size = len(TRAILER_PAYLOAD)
+
+    response = _stream(client, range_header="bytes=16-63")
+
+    assert response.status_code == 206
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.headers["content-range"] == f"bytes 16-63/{size}"
+    assert response.headers["content-length"] == "48"
+    assert response.content == TRAILER_PAYLOAD[16:64]

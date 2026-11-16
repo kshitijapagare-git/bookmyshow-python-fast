@@ -21,7 +21,12 @@ from .kafka_consumer import (
     build_kafka_event_consumer,
 )
 from .kafka_producer import KafkaSettings, build_event_publisher
-from .media import KIND_SUBDIRS, MEDIA_URL_PREFIX, MediaSettings
+from .media import (
+    DEFAULT_STORAGE_BACKEND,
+    KIND_SUBDIRS,
+    MEDIA_URL_PREFIX,
+    MediaSettings,
+)
 from .payments_client import PaymentsSettings
 from .rabbit_publisher import RabbitSettings, build_rabbit_publisher
 from .reviews_client import ReviewsSettings
@@ -145,14 +150,18 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
 
     register_error_handlers(application)
 
-    # Mounted from this app's own settings, so a per-app MEDIA_UPLOAD_DIR is honoured;
-    # StaticFiles refuses to mount a directory that does not exist yet.
-    _ensure_media_directories(application.state.media_settings)
-    application.mount(
-        MEDIA_URL_PREFIX,
-        StaticFiles(directory=application.state.media_settings.upload_dir),
-        name="media",
-    )
+    # Only the local backend has a directory tree to create and a /media mount to serve:
+    # a bucket-backed deployment answers its object urls itself, so there is nothing to
+    # mount and no upload tree to create. Mounted from this app's own settings, so a
+    # per-app MEDIA_UPLOAD_DIR is honoured; StaticFiles refuses to mount a directory
+    # that does not exist yet.
+    if application.state.media_settings.storage_backend == DEFAULT_STORAGE_BACKEND:
+        _ensure_media_directories(application.state.media_settings)
+        application.mount(
+            MEDIA_URL_PREFIX,
+            StaticFiles(directory=application.state.media_settings.upload_dir),
+            name="media",
+        )
 
     application.include_router(cities.router)
     application.include_router(cinemas.router)

@@ -15,9 +15,13 @@ presign secret and lifetime included -- with the same fall-back-not-raise conven
 `PaymentsSettings` and `ReviewsSettings`: an absent, blank or unparseable value selects
 the default instead of raising.
 
-`integrity_report` is the read-back seam for the integrity and verify routes: it streams
-the stored object through `digest_of_file` and compares the result in constant time with
-the digest recorded at upload, so a file replaced on disk reads as untrusted.
+The seam reads back through the same interface it writes through -- `exists`,
+`head`, `open_stream`, `read_bytes` and `delete` -- so a route never needs to know
+whether an object is a file on this host or an object in a bucket; only
+`LocalStorageBackend` still has a `path_for`. `integrity_report` is the read-back seam
+for the integrity and verify routes: it streams the stored object through
+`digest_of_stream` and compares the result in constant time with the digest recorded at
+upload, so an object replaced after the upload reads as untrusted.
 """
 
 import hashlib
@@ -25,7 +29,7 @@ import logging
 import os
 import secrets
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -33,10 +37,13 @@ from typing import Any, Protocol
 from fastapi import Request, UploadFile
 
 from .schemas import MediaKind
+from .streaming import ByteRange, iter_file_range
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_STORAGE_BACKEND = "local"
+# The one other backend name this app knows; every other name falls back to local.
+S3_STORAGE_BACKEND = "s3"
 DEFAULT_UPLOAD_DIR = "media"
 DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024
@@ -45,6 +52,10 @@ DEFAULT_HASH_ALGORITHM = "sha256"
 SUPPORTED_HASH_ALGORITHMS: frozenset[str] = frozenset({DEFAULT_HASH_ALGORITHM})
 DEFAULT_MEDIA_PRESIGN_EXPIRES_SECONDS = 900
 DEFAULT_MEDIA_PRESIGN_SECRET = "dev-presign-secret-change-me"
+DEFAULT_S3_REGION = "us-east-1"
+# An empty prefix keeps every object key at the bucket root.
+DEFAULT_S3_MEDIA_PREFIX = ""
+SUPPORTED_SSE: frozenset[str] = frozenset({"AES256"})
 
 CHUNK_SIZE = 1024 * 1024
 MEDIA_URL_PREFIX = "/media"
@@ -109,6 +120,26 @@ def _positive_int(name: str, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _strip_slashes(value: str) -> str:
+    """A key prefix without the leading and trailing slashes joining would double."""
+    return (value or "").strip().strip("/")
+
+
+def _sse(value: str) -> str | None:
+    """The configured server-side encryption, or None when it is off or unsupported.
+
+    Only the algorithms S3 actually accepts are kept, so a mistyped `S3_SSE` turns
+    encryption off with a warning rather than failing every put with a parameter error.
+    """
+    configured = (value or "").strip().upper()
+    if not configured:
+        return None
+    if configured not in SUPPORTED_SSE:
+        logger.warning("unsupported S3_SSE %r, storing with the bucket default", value)
+        return None
+    return configured
+
+
 def new_hasher(algorithm: str) -> Any:
     """A hashlib digest for `algorithm`; an unsupported name falls back to sha256.
 
@@ -140,6 +171,25 @@ def digest_of_file(
     return digest.hexdigest(), size
 
 
+def digest_of_stream(
+    stream: Iterable[bytes], *, algorithm: str, chunk_size: int = CHUNK_SIZE
+) -> tuple[str, int]:
+    """Hash an already-chunked object, answering its hex digest and byte count.
+
+    The chunks come from `StorageBackend.open_stream`, so this works the same for a
+    file on disk and for an object read out of a bucket, and the object is never held
+    whole in memory to hash it.
+    """
+    digest = new_hasher(algorithm)
+    size = 0
+    for chunk in stream:
+        if not chunk:
+            continue
+        size += len(chunk)
+        digest.update(chunk)
+    return digest.hexdigest(), size
+
+
 @dataclass(frozen=True)
 class MediaSettings:
     """Where uploads are stored, how large each kind may be and who may post them."""
@@ -152,6 +202,14 @@ class MediaSettings:
     hash_algorithm: str = DEFAULT_HASH_ALGORITHM
     presign_secret: str = DEFAULT_MEDIA_PRESIGN_SECRET
     presign_expires_seconds: int = DEFAULT_MEDIA_PRESIGN_EXPIRES_SECONDS
+    # Where the S3 backend stores objects; a blank bucket means S3 is not configured.
+    s3_bucket: str = ""
+    s3_region: str = DEFAULT_S3_REGION
+    s3_endpoint_url: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_media_prefix: str = DEFAULT_S3_MEDIA_PREFIX
+    s3_sse: str | None = None
 
     @classmethod
     def from_env(cls) -> "MediaSettings":
@@ -178,6 +236,15 @@ class MediaSettings:
             presign_expires_seconds=_positive_int(
                 "MEDIA_PRESIGN_EXPIRES_SECONDS", DEFAULT_MEDIA_PRESIGN_EXPIRES_SECONDS
             ),
+            s3_bucket=_env("S3_BUCKET", ""),
+            s3_region=_env("S3_REGION", DEFAULT_S3_REGION),
+            s3_endpoint_url=_env("S3_ENDPOINT_URL", ""),
+            s3_access_key_id=_env("S3_ACCESS_KEY_ID", ""),
+            s3_secret_access_key=_env("S3_SECRET_ACCESS_KEY", ""),
+            s3_media_prefix=_strip_slashes(
+                _env("S3_MEDIA_PREFIX", DEFAULT_S3_MEDIA_PREFIX)
+            ),
+            s3_sse=_sse(_env("S3_SSE", "")),
         )
 
 
@@ -229,11 +296,42 @@ class StoredObject:
 
 
 @dataclass(frozen=True)
+class PresignedUpload:
+    """Where a client uploads its bytes: the url, its method and its headers.
+
+    `key` is the destination the backend will store the bytes under, or "" when the
+    backend derives it from the bytes themselves -- the local backend, which only sees
+    them once they have been streamed through its own upload route.
+    """
+
+    url: str
+    method: str
+    headers: dict[str, str]
+    key: str
+
+
+@dataclass(frozen=True)
+class ObjectHead:
+    """What a backend can report about a stored object without reading its bytes."""
+
+    size: int
+    content_type: str | None
+
+
+@dataclass(frozen=True)
+class StorageHealth:
+    """Whether the backend's storage answers right now, and which backend it is."""
+
+    backend: str
+    reachable: bool
+
+
+@dataclass(frozen=True)
 class IntegrityResult:
     """One integrity read: the values recorded at upload and the ones recomputed now.
 
     `sha256` and `size` are what the `MediaAsset` row says it stored; `recomputed_*`
-    are what the bytes on disk hash to right now, and are None when the object is gone.
+    are what the bytes in storage hash to right now, and are None when the object is gone.
     """
 
     sha256: str
@@ -293,7 +391,13 @@ class RequestStreamChunks:
 
 
 class StorageBackend(Protocol):
-    """The one seam between the upload route and wherever the bytes actually live."""
+    """The one seam between the upload routes and wherever the bytes actually live.
+
+    Writing goes through `save`/`save_exact`, reading through `exists`/`head`/
+    `open_stream`/`read_bytes`, and `presigned_upload`/`public_url` are how a client is
+    handed a url to upload to or to load. Only the local backend has a `path_for`; a
+    route that needs one is a route that has not been fitted to the seam.
+    """
 
     async def save(
         self,
@@ -318,11 +422,44 @@ class StorageBackend(Protocol):
         ...
 
     def public_url(self, key: str) -> str:
-        """The public path the stored object is served from."""
+        """The url a client loads the stored object from."""
         ...
 
-    def path_for(self, key: str) -> Path:
-        """Where this key lives on local disk, for the backends that have a disk."""
+    def open_stream(
+        self, key: str, byte_range: ByteRange | None = None
+    ) -> Iterator[bytes]:
+        """Yield the stored object in bounded chunks, honouring one byte range."""
+        ...
+
+    def read_bytes(self, key: str) -> bytes:
+        """The whole object's bytes; only for objects already known to be small."""
+        ...
+
+    def delete(self, key: str) -> None:
+        """Remove the stored object; deleting one that is already gone is not an error."""
+        ...
+
+    def exists(self, key: str) -> bool:
+        """Whether an object is stored under this key right now."""
+        ...
+
+    def head(self, key: str) -> ObjectHead | None:
+        """What storage reports about the object without reading it; None when absent."""
+        ...
+
+    def presigned_upload(
+        self,
+        *,
+        asset_id: int,
+        kind: MediaKind,
+        size: int,
+        content_type: str,
+    ) -> PresignedUpload:
+        """Where a client uploads the declared bytes, and the key they land under."""
+        ...
+
+    def health(self) -> StorageHealth:
+        """Whether this backend's storage answers; never raises, it reports instead."""
         ...
 
 
@@ -333,12 +470,81 @@ class LocalStorageBackend:
         self.settings = settings
 
     def path_for(self, key: str) -> Path:
-        """`MEDIA_UPLOAD_DIR` joined with the key; the key is built here, never by callers."""
+        """`MEDIA_UPLOAD_DIR` joined with the key; the key is built here, never by callers.
+
+        This is a local-backend detail rather than part of the storage seam: everything
+        outside this class reads through `open_stream`, `read_bytes` or `head`.
+        """
         return Path(self.settings.upload_dir) / key
 
     def public_url(self, key: str) -> str:
         """`/media/{key}`, served by the static mount `create_app` installs."""
         return f"{MEDIA_URL_PREFIX}/{key}"
+
+    def open_stream(
+        self, key: str, byte_range: ByteRange | None = None
+    ) -> Iterator[bytes]:
+        """Stream the stored file through `iter_file_range`, at most one chunk a read."""
+        return iter_file_range(self.path_for(key), byte_range)
+
+    def read_bytes(self, key: str) -> bytes:
+        """The whole stored file; only for objects already known to be small."""
+        return self.path_for(key).read_bytes()
+
+    def delete(self, key: str) -> None:
+        """Unlink the stored file; a key with no file behind it is not an error."""
+        self.path_for(key).unlink(missing_ok=True)
+
+    def exists(self, key: str) -> bool:
+        """Whether the file this key names is present on disk."""
+        return self.path_for(key).is_file()
+
+    def head(self, key: str) -> ObjectHead | None:
+        """The stored file's size; None when nothing is stored under the key.
+
+        A plain file carries no content type of its own -- the row records what the
+        upload declared -- so the reported content type is always None here.
+        """
+        path = self.path_for(key)
+        if not path.is_file():
+            return None
+        return ObjectHead(size=path.stat().st_size, content_type=None)
+
+    def presigned_upload(
+        self,
+        *,
+        asset_id: int,
+        kind: MediaKind,
+        size: int,
+        content_type: str,
+    ) -> PresignedUpload:
+        """The token-signed `PUT` this backend's own upload route accepts.
+
+        The token lives in `app.presign`, which imports `MediaSettings` from this
+        module, so it is imported inside the method rather than at module level. The
+        destination key is empty because `save_exact` derives it from the bytes.
+        """
+        from .presign import upload_url
+
+        return PresignedUpload(
+            url=upload_url(
+                self.settings,
+                asset_id=asset_id,
+                kind=kind,
+                size=size,
+                content_type=content_type,
+            ),
+            method="PUT",
+            headers={"Content-Type": content_type},
+            key="",
+        )
+
+    def health(self) -> StorageHealth:
+        """Reachable exactly when the configured upload directory exists."""
+        return StorageHealth(
+            backend=DEFAULT_STORAGE_BACKEND,
+            reachable=Path(self.settings.upload_dir).is_dir(),
+        )
 
     async def save(
         self,
@@ -427,11 +633,12 @@ def integrity_report(
 ) -> IntegrityResult:
     """Recompute the stored object's digest and compare it with the recorded one.
 
-    A missing stored object is not an error: it is exactly the untrusted state this
-    report exists to describe, so it answers verified=False with no recomputed digest.
+    The object is read back through the storage seam -- `exists` and `open_stream` --
+    so the report works for a file on this host and for a bucket alike. A missing
+    stored object is not an error: it is exactly the untrusted state this report exists
+    to describe, so it answers verified=False with no recomputed digest.
     """
-    path = storage.path_for(storage_key)
-    if not path.is_file():
+    if not storage.exists(storage_key):
         return IntegrityResult(
             sha256=expected_sha256,
             size=expected_size,
@@ -440,7 +647,9 @@ def integrity_report(
             recomputed_size=None,
         )
 
-    recomputed_sha256, recomputed_size = digest_of_file(path=path, algorithm=algorithm)
+    recomputed_sha256, recomputed_size = digest_of_stream(
+        storage.open_stream(storage_key), algorithm=algorithm
+    )
     return IntegrityResult(
         sha256=expected_sha256,
         size=expected_size,
@@ -451,7 +660,27 @@ def integrity_report(
 
 
 def build_storage_backend(settings: MediaSettings) -> StorageBackend:
-    """The backend for these settings; an unknown backend name falls back to local."""
+    """The backend these settings select; anything unusable falls back to local.
+
+    `MEDIA_STORAGE_BACKEND=s3` selects the bucket-backed backend once `S3_BUCKET` names
+    a bucket. An s3 selection with no bucket is a configuration mistake rather than a
+    usable backend -- it would fail every upload with a client parameter error -- so it
+    warns and falls back to local, exactly as an unknown name does.
+    `app.s3_storage` imports the settings and helpers from this module, so it is
+    imported inside this function rather than at module level.
+    """
+    if settings.storage_backend == S3_STORAGE_BACKEND:
+        if not settings.s3_bucket:
+            logger.warning(
+                "MEDIA_STORAGE_BACKEND is %r but S3_BUCKET is not set, using %r",
+                S3_STORAGE_BACKEND,
+                DEFAULT_STORAGE_BACKEND,
+            )
+            return LocalStorageBackend(settings)
+        from .s3_storage import S3StorageBackend
+
+        return S3StorageBackend(settings)
+
     if settings.storage_backend != DEFAULT_STORAGE_BACKEND:
         logger.warning(
             "unknown MEDIA_STORAGE_BACKEND %r, using %r",

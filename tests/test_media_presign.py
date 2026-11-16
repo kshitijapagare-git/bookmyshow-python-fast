@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.main import app
-from app.media import max_bytes_for
+from app.media import ObjectHead, PresignedUpload, get_storage_backend, max_bytes_for
 from app.models import MediaAsset, User
 from app.presign import sign_upload_token
 from app.reviews_client import get_reviews_client
@@ -35,6 +35,7 @@ from app.routers.media import (
 from app.routers.users import AVATAR_NOT_FOUND_DETAIL
 from app.schemas import MediaKind
 from app.security import issue_token
+from app.streaming import ByteRange
 
 PRESIGN_URL = "/api/media/presign"
 UPLOAD_URL = "/api/media/{asset_id}/upload"
@@ -796,3 +797,128 @@ def test_avatar_read_path_is_404_without_one_and_401_without_a_token(client) -> 
     assert problem["status"] == 401
     assert problem["detail"] == "Unauthorized"
     assert problem["instance"] == AVATAR_URL
+
+
+class _StubStorage:
+    """A backend whose answers this test chooses, injected through the storage seam.
+
+    Only the members the presign and completion routes call are needed: the url they
+    hand out, and what storage reports about the object the bytes landed in.
+    """
+
+    def __init__(
+        self,
+        *,
+        presigned: PresignedUpload | None = None,
+        head: ObjectHead | None = None,
+        payload: bytes = b"",
+    ) -> None:
+        self.presigned = presigned
+        self.object_head = head
+        self.payload = payload
+        self.presign_calls: list[dict[str, object]] = []
+
+    def presigned_upload(
+        self, *, asset_id: int, kind: MediaKind, size: int, content_type: str
+    ) -> PresignedUpload:
+        self.presign_calls.append(
+            {
+                "asset_id": asset_id,
+                "kind": kind,
+                "size": size,
+                "content_type": content_type,
+            }
+        )
+        assert self.presigned is not None
+        return self.presigned
+
+    def head(self, key: str) -> ObjectHead | None:
+        return self.object_head
+
+    def open_stream(
+        self, key: str, byte_range: ByteRange | None = None
+    ) -> Iterator[bytes]:
+        yield self.payload
+
+    def public_url(self, key: str) -> str:
+        return f"https://bucket.example/{key}"
+
+
+@contextmanager
+def _use_storage(storage: object) -> Iterator[object]:
+    """Serve these storage answers; the override is always popped again."""
+    app.dependency_overrides[get_storage_backend] = lambda: storage
+    try:
+        yield storage
+    finally:
+        app.dependency_overrides.pop(get_storage_backend, None)
+
+
+def test_presign_forwards_the_backends_upload_url(client) -> None:
+    """The presign route hands out the backend's own url, not a token it signed itself."""
+    user_id, token = _create_user("+919000005019")
+    stub = _StubStorage(
+        presigned=PresignedUpload(
+            url="https://bms-media.s3.amazonaws.com/avatars/1.png?X-Amz-Signature=stub",
+            method="PUT",
+            headers={"Content-Type": "image/png"},
+            key="avatars/1.png",
+        )
+    )
+
+    with _use_storage(stub):
+        response = _presign(client, token, **_avatar_body())
+
+    assert response.status_code == 201
+    body = response.json()
+    assert set(body) == PRESIGN_KEYS
+    assert body["uploadUrl"] == stub.presigned.url
+    assert body["method"] == "PUT"
+    assert body["expiresIn"] == app.state.media_settings.presign_expires_seconds
+    assert body["headers"] == {"Content-Type": "image/png"}
+    # The backend is asked about exactly the asset it is about to receive bytes for.
+    assert stub.presign_calls == [
+        {
+            "asset_id": body["assetId"],
+            "kind": MediaKind.AVATAR,
+            "size": len(AVATAR_PAYLOAD),
+            "content_type": "image/png",
+        }
+    ]
+
+    asset = _asset(body["assetId"])
+    assert asset is not None
+    assert asset.user_id == user_id
+    # The destination is recorded up front, so completion can head exactly that object.
+    assert asset.storage_key == "avatars/1.png"
+    assert asset.uploaded_at is None
+
+
+def test_complete_rejects_a_head_size_mismatch(client) -> None:
+    """Completion believes storage's head, not the size the client declared at presign."""
+    _, token = _create_user("+919000005020")
+    asset_id = _upload_avatar(client, token)
+    stored = _asset(asset_id)
+    assert stored is not None
+    stub = _StubStorage(
+        head=ObjectHead(size=stored.size_bytes + 1, content_type="image/png"),
+        payload=AVATAR_PAYLOAD,
+    )
+
+    with _use_storage(stub):
+        response = _complete(client, asset_id, token)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert set(body) == PROBLEM_DETAIL_KEYS
+    assert body["type"] == "about:blank"
+    assert body["title"] == "Unprocessable Entity"
+    assert body["status"] == 422
+    assert body["detail"] == COMPLETE_MISMATCH_DETAIL
+    assert body["instance"] == COMPLETE_URL.format(asset_id=asset_id)
+
+    unchanged = _asset(asset_id)
+    assert unchanged is not None
+    assert unchanged.is_current is False
+    assert unchanged.uploaded_at is not None
+

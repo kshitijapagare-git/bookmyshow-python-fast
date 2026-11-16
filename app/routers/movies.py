@@ -30,7 +30,6 @@ from ..schemas import MediaAssetOut, MediaKind, MovieOut, MovieSummaryOut
 from ..security import require_media_service_token
 from ..streaming import (
     UnsatisfiableRangeError,
-    iter_file_range,
     parse_range_header,
 )
 from ..timeutil import today_ist, utc_from_ist
@@ -47,13 +46,46 @@ ACCEPT_RANGES = "bytes"
 RANGE_NOT_SATISFIABLE_DETAIL = "Range not satisfiable"
 
 
-def _to_summary(movie: Movie) -> MovieSummaryOut:
+def _current_media_url(
+    movie: Movie,
+    kind: MediaKind,
+    db: Session,
+    storage: StorageBackend,
+    fallback: str | None,
+) -> str | None:
+    """The url of the movie's current asset of this kind, else the stored column.
+
+    The url is asked of the backend rather than read off the row, because a
+    bucket-backed backend signs a fresh, short-lived GET url on every read. A seeded
+    movie has no asset row at all, so its stored column is what a client sees, exactly
+    as before.
+    """
+    asset = db.scalars(
+        select(MediaAsset)
+        .where(
+            MediaAsset.movie_id == movie.id,
+            MediaAsset.kind == kind.value,
+            MediaAsset.is_current.is_(True),
+        )
+        .order_by(MediaAsset.id.desc())
+        .limit(1)
+    ).first()
+    if asset is None:
+        return fallback
+    return storage.public_url(asset.storage_key)
+
+
+def _to_summary(
+    movie: Movie, db: Session, storage: StorageBackend
+) -> MovieSummaryOut:
     return MovieSummaryOut(
         id=movie.id,
         title=movie.title,
         slug=movie.slug,
         genres=movie.genres,
-        posterUrl=movie.poster_url,
+        posterUrl=_current_media_url(
+            movie, MediaKind.POSTER, db, storage, movie.poster_url
+        ),
         rating=movie.rating,
         votes=movie.votes,
         likes=movie.likes,
@@ -61,13 +93,15 @@ def _to_summary(movie: Movie) -> MovieSummaryOut:
     )
 
 
-def _to_detail(movie: Movie, db: Session) -> MovieOut:
+def _to_detail(movie: Movie, db: Session, storage: StorageBackend) -> MovieOut:
     return MovieOut(
         id=movie.id,
         title=movie.title,
         slug=movie.slug,
         genres=movie.genres,
-        posterUrl=movie.poster_url,
+        posterUrl=_current_media_url(
+            movie, MediaKind.POSTER, db, storage, movie.poster_url
+        ),
         rating=movie.rating,
         votes=movie.votes,
         likes=movie.likes,
@@ -78,7 +112,9 @@ def _to_detail(movie: Movie, db: Session) -> MovieOut:
         durationMinutes=movie.duration_minutes,
         certificate=movie.certificate,
         releaseDate=movie.release_date,
-        backdropUrl=movie.backdrop_url,
+        backdropUrl=_current_media_url(
+            movie, MediaKind.BACKDROP, db, storage, movie.backdrop_url
+        ),
         trailerUrl=_current_trailer_url(movie, db),
         interestedCount=movie.interested_count,
     )
@@ -103,23 +139,31 @@ def _movie_ids_with_shows(city_slug: str, db: Session) -> set[int]:
 
 
 @router.get("", response_model=list[MovieSummaryOut])
-def list_movies(city: str | None = None, db: Session = Depends(get_db)):
+def list_movies(
+    city: str | None = None,
+    db: Session = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage_backend),
+):
     query = select(Movie).order_by(Movie.id)
     if city:
         query = query.where(Movie.id.in_(list(_movie_ids_with_shows(city, db))))
     movies = db.scalars(query)
-    return [_to_summary(movie) for movie in movies]
+    return [_to_summary(movie, db, storage) for movie in movies]
 
 
 @router.get("/{movie_id}", response_model=MovieOut)
-def get_movie(movie_id: int, db: Session = Depends(get_db)):
+def get_movie(
+    movie_id: int,
+    db: Session = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage_backend),
+):
     movie = db.get(Movie, movie_id)
     if movie is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Movie not found: {movie_id}",
         )
-    return _to_detail(movie, db)
+    return _to_detail(movie, db, storage)
 
 
 def _max_bytes_for(kind: MediaKind, settings: MediaSettings) -> int:
@@ -288,9 +332,10 @@ async def stream_movie_trailer(
 ) -> StreamingResponse:
     """Stream the movie's current trailer, honouring one `Range: bytes` slice.
 
-    The file is read through `iter_file_range`, so a browser can start playing after
-    the first chunk and seek with a Range request instead of downloading the whole
-    video. The route is public: a moviegoer's player loads it directly.
+    The bytes are read through `StorageBackend.open_stream`, so a browser can start
+    playing after the first chunk and seek with a Range request instead of downloading
+    the whole video, and the same route works whether the file sits on this host or in a
+    bucket. The route is public: a moviegoer's player loads it directly.
     """
     if db.get(Movie, movie_id) is None:
         raise HTTPException(
@@ -298,7 +343,6 @@ async def stream_movie_trailer(
             detail=f"Movie not found: {movie_id}",
         )
     asset = _current_trailer_asset(movie_id, db)
-    path = storage.path_for(asset.storage_key)
 
     try:
         byte_range = parse_range_header(range_header, asset.size_bytes)
@@ -313,7 +357,7 @@ async def stream_movie_trailer(
     if byte_range is None:
         headers["Content-Length"] = str(asset.size_bytes)
         return StreamingResponse(
-            iter_file_range(path, None),
+            storage.open_stream(asset.storage_key),
             media_type=asset.content_type,
             headers=headers,
         )
@@ -323,7 +367,7 @@ async def stream_movie_trailer(
     )
     headers["Content-Length"] = str(byte_range.length)
     return StreamingResponse(
-        iter_file_range(path, byte_range),
+        storage.open_stream(asset.storage_key, byte_range),
         status_code=status.HTTP_206_PARTIAL_CONTENT,
         media_type=asset.content_type,
         headers=headers,

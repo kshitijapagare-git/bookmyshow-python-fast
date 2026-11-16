@@ -18,7 +18,12 @@ from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.main import app
-from app.media import KIND_SUBDIRS, MediaSettings, get_media_settings
+from app.media import (
+    KIND_SUBDIRS,
+    MediaSettings,
+    get_media_settings,
+    get_storage_backend,
+)
 from app.models import MediaAsset
 from app.schemas import MediaKind
 from app.security import MEDIA_SERVICE_TOKEN
@@ -29,6 +34,8 @@ ASSET_KEYS = {"assetId", "kind", "url", "size", "contentType", "sha256"}
 PROBLEM_DETAIL_KEYS = {"type", "title", "status", "detail", "instance"}
 INVALID_TOKEN_DETAIL = "Invalid media service token"
 MOVIE_ID = 1
+# A seeded movie nothing has been uploaded for, so its stored columns are what a client sees.
+UNSEEDED_MOVIE_ID = 2
 POSTER_PAYLOAD = b"\x89PNG\r\n\x1a\nposter-bytes"
 SECOND_POSTER_PAYLOAD = b"\x89PNG\r\n\x1a\nsecond-poster-bytes"
 BACKDROP_PAYLOAD = b"\xff\xd8\xff\xe0backdrop-bytes"
@@ -348,3 +355,65 @@ def test_the_internal_token_is_required(client, token: str | None) -> None:
     assert body["instance"] == _url()
     assert _assets() == []
     assert _stored_files() == before
+
+
+class _SigningStorage:
+    """A backend that answers its own url for a key, as the S3 backend does at read time."""
+
+    def __init__(self) -> None:
+        self.keys: list[str] = []
+
+    def public_url(self, key: str) -> str:
+        self.keys.append(key)
+        return f"https://bucket.example/{key}"
+
+
+@contextmanager
+def _use_storage(storage: object) -> Iterator[object]:
+    """Serve this backend to the movie routes; the override is always popped again."""
+    app.dependency_overrides[get_storage_backend] = lambda: storage
+    try:
+        yield storage
+    finally:
+        app.dependency_overrides.pop(get_storage_backend, None)
+
+
+def test_catalogue_urls_are_regenerated_from_the_asset_row(client) -> None:
+    """The catalogue asks the backend for the url instead of echoing the stored column."""
+    seeded = client.get(f"/api/movies/{UNSEEDED_MOVIE_ID}")
+
+    assert seeded.status_code == 200
+    seeded_body = seeded.json()
+
+    poster = _upload(client, MOVIE_ID, "POSTER", POSTER_PAYLOAD, "image/png")
+    backdrop = _upload(client, MOVIE_ID, "BACKDROP", BACKDROP_PAYLOAD, "image/jpeg")
+    assert poster.status_code == 201
+    assert backdrop.status_code == 201
+
+    poster_key = _assets(MOVIE_ID, "POSTER")[0].storage_key
+    backdrop_key = _assets(MOVIE_ID, "BACKDROP")[0].storage_key
+    stub = _SigningStorage()
+
+    with _use_storage(stub):
+        detail = client.get(f"/api/movies/{MOVIE_ID}")
+        listed = client.get("/api/movies")
+        untouched = client.get(f"/api/movies/{UNSEEDED_MOVIE_ID}")
+
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["posterUrl"] == f"https://bucket.example/{poster_key}"
+    assert body["backdropUrl"] == f"https://bucket.example/{backdrop_key}"
+    # The url the upload answered is what the row stores; a read resolves its own.
+    assert body["posterUrl"] != poster.json()["url"]
+    # The detail read asked for the poster's url first, then the backdrop's.
+    assert stub.keys[:2] == [poster_key, backdrop_key]
+
+    assert listed.status_code == 200
+    by_id = {movie["id"]: movie for movie in listed.json()}
+    assert by_id[MOVIE_ID]["posterUrl"] == body["posterUrl"]
+
+    # A movie with no asset row keeps the stored column, exactly as before.
+    assert untouched.status_code == 200
+    assert untouched.json()["posterUrl"] == seeded_body["posterUrl"]
+    assert untouched.json()["backdropUrl"] == seeded_body["backdropUrl"]
+
