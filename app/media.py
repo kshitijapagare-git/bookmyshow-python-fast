@@ -45,6 +45,7 @@ DEFAULT_STORAGE_BACKEND = "local"
 # The backend names this app knows; every other name falls back to local.
 S3_STORAGE_BACKEND = "s3"
 GCS_STORAGE_BACKEND = "gcs"
+MINIO_STORAGE_BACKEND = "minio"
 DEFAULT_UPLOAD_DIR = "media"
 DEFAULT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024
@@ -57,7 +58,16 @@ DEFAULT_S3_REGION = "us-east-1"
 # An empty prefix keeps every object key at the bucket root.
 DEFAULT_S3_MEDIA_PREFIX = ""
 DEFAULT_GCS_MEDIA_PREFIX = ""
+DEFAULT_MINIO_MEDIA_PREFIX = ""
+# Secure by default, because a MinIO reached over https needs no extra knob; a local
+# container sets MINIO_SECURE=false.
+DEFAULT_MINIO_SECURE = True
+# Creating a bucket is never implicit: a deployment that needs it opts in.
+DEFAULT_MINIO_CREATE_BUCKET = False
 SUPPORTED_SSE: frozenset[str] = frozenset({"AES256"})
+# The spellings a boolean knob accepts, so a value never has to be a Python literal.
+TRUE_FLAGS: frozenset[str] = frozenset({"true", "1", "yes", "on"})
+FALSE_FLAGS: frozenset[str] = frozenset({"false", "0", "no", "off"})
 
 CHUNK_SIZE = 1024 * 1024
 MEDIA_URL_PREFIX = "/media"
@@ -142,6 +152,24 @@ def _sse(value: str) -> str | None:
     return configured
 
 
+def _flag(name: str, default: bool) -> bool:
+    """A boolean from the environment; a blank or unrecognised value keeps the default.
+
+    Only the spellings a human actually writes are accepted, case-insensitively, so a
+    mistyped `MINIO_SECURE` falls back instead of turning `http` into `https` by
+    accident -- exactly the convention `_sse` uses for its own knob.
+    """
+    raw = _env(name, "").lower()
+    if not raw:
+        return default
+    if raw in TRUE_FLAGS:
+        return True
+    if raw in FALSE_FLAGS:
+        return False
+    logger.warning("unrecognised %s %r, using %r", name, raw, default)
+    return default
+
+
 def new_hasher(algorithm: str) -> Any:
     """A hashlib digest for `algorithm`; an unsupported name falls back to sha256.
 
@@ -220,6 +248,14 @@ class MediaSettings:
     gcs_credentials_json: str = ""
     gcs_credentials_path: str = ""
     gcs_media_prefix: str = DEFAULT_GCS_MEDIA_PREFIX
+    # Where the MinIO backend stores objects; a blank bucket means MinIO is not configured.
+    minio_endpoint: str = ""
+    minio_access_key: str = ""
+    minio_secret_key: str = ""
+    minio_bucket: str = ""
+    minio_secure: bool = DEFAULT_MINIO_SECURE
+    minio_media_prefix: str = DEFAULT_MINIO_MEDIA_PREFIX
+    minio_create_bucket: bool = DEFAULT_MINIO_CREATE_BUCKET
 
     @classmethod
     def from_env(cls) -> "MediaSettings":
@@ -261,6 +297,17 @@ class MediaSettings:
             gcs_credentials_path=_env("GOOGLE_APPLICATION_CREDENTIALS", ""),
             gcs_media_prefix=_strip_slashes(
                 _env("GCS_MEDIA_PREFIX", DEFAULT_GCS_MEDIA_PREFIX)
+            ),
+            minio_endpoint=_env("MINIO_ENDPOINT", ""),
+            minio_access_key=_env("MINIO_ACCESS_KEY", ""),
+            minio_secret_key=_env("MINIO_SECRET_KEY", ""),
+            minio_bucket=_env("MINIO_BUCKET", ""),
+            minio_secure=_flag("MINIO_SECURE", DEFAULT_MINIO_SECURE),
+            minio_media_prefix=_strip_slashes(
+                _env("MINIO_MEDIA_PREFIX", DEFAULT_MINIO_MEDIA_PREFIX)
+            ),
+            minio_create_bucket=_flag(
+                "MINIO_CREATE_BUCKET", DEFAULT_MINIO_CREATE_BUCKET
             ),
         )
 
@@ -337,10 +384,17 @@ class ObjectHead:
 
 @dataclass(frozen=True)
 class StorageHealth:
-    """Whether the backend's storage answers right now, and which backend it is."""
+    """Whether the backend's storage answers right now, and which backend it is.
+
+    `bucket` and `endpoint` name where a bucket-backed backend is pointed; they stay
+    empty for the local, S3 and GCS backends, so a caller that only cares about the
+    backend and its reachability keeps comparing the same two values it always did.
+    """
 
     backend: str
     reachable: bool
+    bucket: str = ""
+    endpoint: str = ""
 
 
 @dataclass(frozen=True)
@@ -689,8 +743,14 @@ def build_storage_backend(settings: MediaSettings) -> StorageBackend:
     configuration must be visible in the log rather than served silently from disk. The
     client is memoised on the settings, so resolving it eagerly here is a cache hit for
     every request after the first.
-    `app.s3_storage` and `app.gcs_storage` import the settings and helpers from this
-    module, so they are imported inside this function rather than at module level.
+    `MEDIA_STORAGE_BACKEND=minio` selects the S3-compatible backend pointed at a MinIO
+    endpoint, once `MINIO_BUCKET` names a bucket. A blank bucket -- and a blank
+    `MINIO_ENDPOINT`, which would leave boto3 addressing AWS S3 instead of the local
+    MinIO -- is a configuration mistake rather than a usable backend, so it warns and
+    falls back to local exactly as the s3 selection without a bucket does.
+    `app.s3_storage`, `app.gcs_storage` and `app.minio_storage` import the settings and
+    helpers from this module, so they are imported inside this function rather than at
+    module level.
     """
     if settings.storage_backend == S3_STORAGE_BACKEND:
         if not settings.s3_bucket:
@@ -730,6 +790,25 @@ def build_storage_backend(settings: MediaSettings) -> StorageBackend:
             )
             return LocalStorageBackend(settings)
         return backend
+
+    if settings.storage_backend == MINIO_STORAGE_BACKEND:
+        if not settings.minio_bucket:
+            logger.warning(
+                "MEDIA_STORAGE_BACKEND is %r but MINIO_BUCKET is not set, using %r",
+                MINIO_STORAGE_BACKEND,
+                DEFAULT_STORAGE_BACKEND,
+            )
+            return LocalStorageBackend(settings)
+        if not settings.minio_endpoint:
+            logger.warning(
+                "MEDIA_STORAGE_BACKEND is %r but MINIO_ENDPOINT is not set, using %r",
+                MINIO_STORAGE_BACKEND,
+                DEFAULT_STORAGE_BACKEND,
+            )
+            return LocalStorageBackend(settings)
+        from .minio_storage import MinioStorageBackend
+
+        return MinioStorageBackend(settings)
 
     if settings.storage_backend != DEFAULT_STORAGE_BACKEND:
         logger.warning(

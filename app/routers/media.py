@@ -106,14 +106,21 @@ def _normalise_content_type(raw: str) -> str:
 def get_storage_health(
     storage: StorageBackend = Depends(get_storage_backend),
 ) -> MediaStorageHealthOut:
-    """Which backend holds the bytes and whether it answers right now.
+    """Which backend holds the bytes, whether it answers right now, and its destination.
 
     Public and unauthenticated, and always a 200: an unreachable bucket is a state an
     operator needs to read, not a failed request, so `reachable` reports it instead of
-    the status code. Declared above `/{asset_id}` because it is a fixed path.
+    the status code. The bucket and endpoint name where a bucket-backed backend is
+    pointed and stay empty for the local one. Declared above `/{asset_id}` because it is
+    a fixed path.
     """
     health = storage.health()
-    return MediaStorageHealthOut(backend=health.backend, reachable=health.reachable)
+    return MediaStorageHealthOut(
+        backend=health.backend,
+        reachable=health.reachable,
+        bucket=health.bucket,
+        endpoint=health.endpoint,
+    )
 
 
 @router.get("/{asset_id}")

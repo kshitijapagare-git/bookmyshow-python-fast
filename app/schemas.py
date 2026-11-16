@@ -175,10 +175,17 @@ class MediaIntegrityOut(BaseModel):
 
 
 class MediaStorageHealthOut(BaseModel):
-    """Which backend holds the uploaded bytes, and whether it answers right now."""
+    """Which backend holds the uploaded bytes, whether it answers, and where it points.
+
+    `bucket` and `endpoint` name the destination a bucket-backed backend is configured
+    for; they stay empty for the local, S3 and GCS backends, which report only the
+    backend and its reachability.
+    """
 
     backend: str
     reachable: bool
+    bucket: str = ""
+    endpoint: str = ""
 
 
 class MediaVerifyIn(BaseModel):

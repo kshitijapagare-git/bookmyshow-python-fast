@@ -52,6 +52,7 @@ from app.media import (
 from app.main import app, create_app
 from app.models import MediaAsset, User
 from app.presign import decode_upload_token
+from app.reviews_client import get_reviews_client
 from app.s3_storage import (
     S3_PRIVATE_ACL,
     S3_READ_CHUNK_SIZE,
@@ -824,14 +825,14 @@ def test_s3_is_selected_by_media_storage_backend(settings) -> None:
 
 def test_unknown_backend_falls_back_to_local(tmp_path, caplog) -> None:
     """A backend name this build does not know keeps the current local behaviour."""
-    configured = replace(_settings(tmp_path), storage_backend="minio")
+    configured = replace(_settings(tmp_path), storage_backend="azure")
 
     with caplog.at_level(logging.WARNING, logger="app.media"):
         backend = build_storage_backend(configured)
 
     assert isinstance(backend, LocalStorageBackend)
     assert backend.settings is configured
-    assert any("minio" in record.getMessage() for record in caplog.records)
+    assert any("azure" in record.getMessage() for record in caplog.records)
 
 
 def test_s3_without_a_bucket_falls_back_to_local(tmp_path, caplog) -> None:
@@ -905,6 +906,23 @@ PRESIGN_URL = "/api/media/presign"
 COMPLETE_URL = "/api/media/{asset_id}/complete"
 
 
+class _StubReviews:
+    """No review is read for an avatar, so the presign ownership check never runs."""
+
+    def get_review(self, *, review_id: int) -> dict[str, object] | None:
+        return None
+
+
+@contextmanager
+def _use_reviews() -> Iterator[None]:
+    """Answer the presign route's reviews dependency; the override is always popped."""
+    app.dependency_overrides[get_reviews_client] = lambda: _StubReviews()
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(get_reviews_client, None)
+
+
 @contextmanager
 def _use_storage(storage: object) -> Iterator[object]:
     """Serve this backend to the media routes; the override is always popped again."""
@@ -967,7 +985,7 @@ def test_complete_heads_the_object_and_stores_the_digest(
     user_id, token = _user("+919000009001")
     auth = {"Authorization": f"Bearer {token}"}
 
-    with _use_storage(backend):
+    with _use_storage(backend), _use_reviews():
         presigned = client.post(
             PRESIGN_URL,
             json={
