@@ -23,7 +23,7 @@ from ..media import (
     get_storage_backend,
     max_bytes_for,
 )
-from ..models import Booking, Group, MediaAsset, Movie, Show, User
+from ..models import Booking, Group, MediaAsset, Movie, ReviewAuthor, Show, User
 from ..payments_client import (
     PaymentsClient,
     PaymentsUnavailableError,
@@ -140,6 +140,26 @@ def _review_forbidden() -> HTTPException:
     )
 
 
+def _record_review_author(
+    *, db: Session, review_id: int, movie_id: int, user_id: int
+) -> None:
+    """Upsert the local (review, movie, author) row a presigned photo resolves against.
+
+    The ratings service owns the review itself and exposes no by-id read, so this row
+    is the only local answer to "who wrote this review". A resubmitted review is an
+    update, not a new author, so it keeps exactly one row with the latest caller.
+    """
+    row = db.get(ReviewAuthor, review_id)
+    if row is None:
+        db.add(
+            ReviewAuthor(review_id=review_id, movie_id=movie_id, user_id=user_id)
+        )
+    else:
+        row.movie_id = movie_id
+        row.user_id = user_id
+    db.commit()
+
+
 @router.post(
     "/{movie_id}/reviews",
     response_model=ReviewOut,
@@ -212,6 +232,14 @@ def create_movie_review(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=REVIEWS_UNAVAILABLE_DETAIL,
         ) from None
+
+    # The presign flow checks a review photo's `ownerId` against this local index,
+    # because the ratings service answers no by-id review read.
+    review_id = body.get("id")
+    if isinstance(review_id, int):
+        _record_review_author(
+            db=db, review_id=review_id, movie_id=movie_id, user_id=user.id
+        )
 
     response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
     return ReviewOut.model_validate(body)

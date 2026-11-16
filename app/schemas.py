@@ -107,6 +107,7 @@ class MediaKind(str, Enum):
     BACKDROP = "BACKDROP"
     TRAILER = "TRAILER"
     REVIEW_PHOTO = "REVIEW_PHOTO"
+    AVATAR = "AVATAR"
 
 
 class MediaAssetOut(BaseModel):
@@ -150,6 +151,52 @@ class MediaVerifyOut(BaseModel):
     """Whether the submitted digest names the bytes storage holds right now."""
 
     match: bool
+
+
+class MediaPurpose(str, Enum):
+    """What a presigned upload is for; the ticket's two lowercase values."""
+
+    AVATAR = "avatar"
+    REVIEW_PHOTO = "review_photo"
+
+
+class MediaPresignIn(BaseModel):
+    """What the client is about to upload, declared before any bytes are sent."""
+
+    purpose: MediaPurpose
+    ownerId: int | None = None
+    filename: NonBlank
+    contentType: NonBlank
+    size: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _review_photo_needs_an_owner(self) -> "MediaPresignIn":
+        """A review photo is uploaded for one review, so its ownerId is required."""
+        if self.purpose is MediaPurpose.REVIEW_PHOTO and self.ownerId is None:
+            raise ValueError("ownerId is required for purpose=review_photo")
+        return self
+
+
+class MediaPresignOut(BaseModel):
+    """Where to send the bytes: the ticket's five fields and nothing else."""
+
+    assetId: int
+    uploadUrl: str
+    method: str
+    expiresIn: int
+    headers: dict[str, str]
+
+
+class MediaCompleteOut(BaseModel):
+    """A completed upload, mirroring the metadata the multipart upload answers."""
+
+    assetId: int
+    url: str
+    sha256: str
+    size: int
+    contentType: str
+    kind: MediaKind
+    verified: bool
 
 
 class Availability(str, Enum):

@@ -81,10 +81,13 @@ AES_KEY_BYTES = 32
 REVIEW_PHOTO_URL = "/api/movies/{movie_id}/reviews/{review_id}/photo"
 INTEGRITY_URL = "/api/media/{asset_id}/integrity"
 VERIFY_URL = "/api/media/{asset_id}/verify"
+PRESIGN_URL = "/api/media/presign"
+COMPLETE_URL = "/api/media/{asset_id}/complete"
 MEDIA_MOVIE_ID = 1
 REVIEW_ID = 501
 VERIFIED_REVIEW_ID = 502
 PHOTO_PAYLOAD = b"\x89PNG\r\n\x1a\nreview-photo-bytes"
+AVATAR_PAYLOAD = b"\x89PNG\r\n\x1a\navatar-bytes"
 
 
 def _b64url_uint(value: str) -> int:
@@ -650,6 +653,120 @@ def test_integrity_and_verify_round_trip_through_an_encrypted_session(
     assert problem["status"] == 415
     assert problem["detail"] == PLAIN_BODY_DETAIL
     assert problem["instance"] == verify_url
+
+
+def test_presigned_upload_round_trip_under_encryption(
+    encrypted_client: TestClient,
+) -> None:
+    """The presign and complete bodies stay encrypted; only the raw PUT is carved out."""
+    session_id, aes_key = handshake(encrypted_client)
+    _, token = _user_token(phone="+919876543230")
+    auth = {"Authorization": f"Bearer {token}"}
+
+    headers, envelope = seal_request(
+        encrypted_client,
+        session_id,
+        aes_key,
+        "POST",
+        PRESIGN_URL,
+        {
+            "purpose": "avatar",
+            "filename": "me.png",
+            "contentType": "image/png",
+            "size": len(AVATAR_PAYLOAD),
+        },
+    )
+    headers.update(auth)
+
+    presigned = _send(encrypted_client, "POST", PRESIGN_URL, headers, envelope)
+
+    assert presigned.status_code == 201
+    assert presigned.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    body = open_response(aes_key, 201, envelope["iv"], presigned.json())
+    assert set(body) == {"assetId", "uploadUrl", "method", "expiresIn", "headers"}
+    assert body["method"] == "PUT"
+    assert body["uploadUrl"].startswith(f"/api/media/{body['assetId']}/upload?token=")
+
+    # The raw bytes go to the signed url with no session headers of any kind.
+    uploaded = encrypted_client.put(
+        body["uploadUrl"],
+        content=AVATAR_PAYLOAD,
+        headers={"Content-Type": body["headers"]["Content-Type"]},
+    )
+
+    assert uploaded.status_code == 204
+
+    complete_url = COMPLETE_URL.format(asset_id=body["assetId"])
+    complete_headers, complete_envelope = seal_request(
+        encrypted_client, session_id, aes_key, "POST", complete_url, None
+    )
+    complete_headers.update(auth)
+
+    completed = _send(
+        encrypted_client, "POST", complete_url, complete_headers, complete_envelope
+    )
+
+    assert completed.status_code == 200
+    assert completed.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    metadata = open_response(aes_key, 200, complete_envelope["iv"], completed.json())
+    assert set(metadata) == {
+        "assetId",
+        "url",
+        "sha256",
+        "size",
+        "contentType",
+        "kind",
+        "verified",
+    }
+    assert metadata["assetId"] == body["assetId"]
+    assert metadata["sha256"] == hashlib.sha256(AVATAR_PAYLOAD).hexdigest()
+    assert metadata["size"] == len(AVATAR_PAYLOAD)
+    assert metadata["contentType"] == "image/png"
+    assert metadata["kind"] == "AVATAR"
+    assert metadata["verified"] is True
+    assert metadata["url"].startswith("/media/avatars/")
+
+    # The /media mount is an ordinary route, so the stored bytes come back encrypted.
+    served = _send(
+        encrypted_client, "GET", metadata["url"], _session_headers(session_id)
+    )
+
+    assert served.status_code == 200
+    assert served.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    stored = open_envelope(
+        key=aes_key,
+        envelope=Envelope.model_validate(served.json()),
+        aad=response_aad(status_code=200, request_iv=""),
+    )
+    assert stored == AVATAR_PAYLOAD
+
+
+def test_plain_presign_body_is_415_under_encryption(
+    encrypted_client: TestClient,
+) -> None:
+    """Presign is an ordinary encrypted route, so a plain JSON body is refused."""
+    _, token = _user_token(phone="+919876543231")
+
+    response = encrypted_client.post(
+        PRESIGN_URL,
+        json={
+            "purpose": "avatar",
+            "filename": "me.png",
+            "contentType": "image/png",
+            "size": 1,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 415
+    body = response.json()
+    assert set(body) == PROBLEM_DETAIL_KEYS
+    assert body["type"] == "about:blank"
+    assert body["title"] == "Unsupported Media Type"
+    assert body["status"] == 415
+    assert body["detail"] == PLAIN_BODY_DETAIL
+    assert body["instance"] == PRESIGN_URL
+    assert response.headers["content-type"] == "application/json"
 
 
 def test_wrapped_key_from_the_webcrypto_fixture_opens_a_session(

@@ -374,14 +374,19 @@ class MediaAsset(Base):
     __tablename__ = "media_assets"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('POSTER','BACKDROP','TRAILER','REVIEW_PHOTO')",
+            "kind IN ('POSTER','BACKDROP','TRAILER','REVIEW_PHOTO','AVATAR')",
             name="ck_media_assets_kind",
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    movie_id: Mapped[int] = mapped_column(
-        ForeignKey("movies.id"), nullable=False, index=True
+    # An avatar belongs to a user and to no movie, so the movie link is nullable.
+    movie_id: Mapped[int | None] = mapped_column(
+        ForeignKey("movies.id"), nullable=True, index=True
+    )
+    # The owner of an AVATAR asset; NULL for a movie or review asset.
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
     )
     # A review lives in the ratings service, so this is its id with no local foreign key.
     review_id: Mapped[int | None] = mapped_column(
@@ -395,6 +400,28 @@ class MediaAsset(Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class ReviewAuthor(Base):
+    """Who wrote a review, recorded locally so a presigned photo can be authorised.
+
+    The ratings service owns the reviews and exposes no by-id read, so this index --
+    written when this API creates a review -- is the only local answer to "did the
+    caller write review N". A review created before this index existed has no row.
+    """
+
+    __tablename__ = "review_authors"
+
+    review_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id"), nullable=False, index=True
+    )
+    movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
