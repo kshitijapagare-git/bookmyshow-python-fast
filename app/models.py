@@ -374,14 +374,19 @@ class MediaAsset(Base):
     __tablename__ = "media_assets"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('POSTER','BACKDROP','TRAILER','REVIEW_PHOTO')",
+            "kind IN ('POSTER','BACKDROP','TRAILER','REVIEW_PHOTO','AVATAR')",
             name="ck_media_assets_kind",
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    movie_id: Mapped[int] = mapped_column(
-        ForeignKey("movies.id"), nullable=False, index=True
+    # An avatar has no movie, and a direct upload creates the row before the bytes.
+    movie_id: Mapped[int | None] = mapped_column(
+        ForeignKey("movies.id"), nullable=True, index=True
+    )
+    # The uploader of an avatar asset; a movie asset leaves this NULL.
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
     )
     # A review lives in the ratings service, so this is its id with no local foreign key.
     review_id: Mapped[int | None] = mapped_column(
@@ -393,8 +398,13 @@ class MediaAsset(Base):
     content_type: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    original_filename: Mapped[str | None] = mapped_column(String, nullable=True)
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # NULL means the row was presigned but the bytes were never stored.
+    uploaded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -714,3 +714,155 @@ def test_middleware_is_absent_when_crypto_is_disabled() -> None:
     assert any(
         middleware.cls is CryptoMiddleware for middleware in enabled.user_middleware
     )
+
+
+PRESIGN_URL = "/api/media/presign"
+PRESIGN_UPLOAD_URL = "/api/media/{asset_id}/upload?token={token}"
+COMPLETE_URL = "/api/media/{asset_id}/complete"
+AVATAR_PAYLOAD = b"\x89PNG\r\n\x1a\navatar-bytes"
+
+
+def test_presign_and_complete_require_an_encryption_session(
+    encrypted_client: TestClient,
+) -> None:
+    """Neither route is public: both sit behind the session check like every other one."""
+    session_id, aes_key = handshake(encrypted_client)
+    _, token = _user_token(phone="+919876543230")
+    auth = {"Authorization": f"Bearer {token}"}
+    payload = {
+        "purpose": "avatar",
+        "filename": "me.png",
+        "contentType": "image/png",
+        "size": len(AVATAR_PAYLOAD),
+    }
+
+    # A well-formed envelope whose session header is missing: the body is not the
+    # problem, the absent session is.
+    headers, envelope = seal_request(
+        encrypted_client, session_id, aes_key, "POST", PRESIGN_URL, payload
+    )
+    unsigned = {
+        name: value for name, value in headers.items() if name != "X-Enc-Session"
+    }
+    unsigned.update(auth)
+    presigned = _send(encrypted_client, "POST", PRESIGN_URL, unsigned, envelope)
+
+    assert presigned.status_code == 428
+    body = presigned.json()
+    assert set(body) == PROBLEM_DETAIL_KEYS
+    assert body["title"] == "Precondition Required"
+    assert body["status"] == 428
+    assert body["detail"] == SESSION_DETAIL
+    assert body["instance"] == PRESIGN_URL
+    assert presigned.headers["content-type"] == "application/json"
+
+    complete_url = COMPLETE_URL.format(asset_id=1)
+    completed = _send(encrypted_client, "POST", complete_url, auth)
+
+    assert completed.status_code == 428
+    complete_body = completed.json()
+    assert set(complete_body) == PROBLEM_DETAIL_KEYS
+    assert complete_body["title"] == "Precondition Required"
+    assert complete_body["status"] == 428
+    assert complete_body["detail"] == SESSION_DETAIL
+    assert complete_body["instance"] == complete_url
+
+    # Holding a session is not enough: the body itself has to be an envelope, so the
+    # route is not on the plain-JSON carve-out list either.
+    plain = encrypted_client.post(
+        PRESIGN_URL, json=payload, headers={**_session_headers(session_id), **auth}
+    )
+
+    assert plain.status_code == 415
+    problem = plain.json()
+    assert set(problem) == PROBLEM_DETAIL_KEYS
+    assert problem["title"] == "Unsupported Media Type"
+    assert problem["status"] == 415
+    assert problem["detail"] == PLAIN_BODY_DETAIL
+    assert problem["instance"] == PRESIGN_URL
+
+
+def test_presigned_upload_is_plain_while_presign_and_complete_are_encrypted(
+    encrypted_client: TestClient,
+) -> None:
+    """The signed PUT is the one carve-out; the two JSON steps stay encrypted."""
+    session_id, aes_key = handshake(encrypted_client)
+    _, token = _user_token(phone="+919876543231")
+    auth = {"Authorization": f"Bearer {token}"}
+    payload = {
+        "purpose": "avatar",
+        "filename": "me.png",
+        "contentType": "image/png",
+        "size": len(AVATAR_PAYLOAD),
+    }
+
+    headers, envelope = seal_request(
+        encrypted_client, session_id, aes_key, "POST", PRESIGN_URL, payload
+    )
+    headers.update(auth)
+    presigned = _send(encrypted_client, "POST", PRESIGN_URL, headers, envelope)
+
+    assert presigned.status_code == 201
+    assert presigned.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    presign_body = open_response(aes_key, 201, envelope["iv"], presigned.json())
+    assert set(presign_body) == {
+        "assetId",
+        "uploadUrl",
+        "method",
+        "expiresIn",
+        "headers",
+    }
+    assert presign_body["method"] == "PUT"
+
+    asset_id = presign_body["assetId"]
+    upload_url = presign_body["uploadUrl"]
+    assert upload_url.startswith(
+        PRESIGN_UPLOAD_URL.format(asset_id=asset_id, token="")
+    )
+
+    # The browser's raw PUT: no session, no envelope, plain JSON back.
+    uploaded = encrypted_client.put(
+        upload_url,
+        content=AVATAR_PAYLOAD,
+        headers={"Content-Type": "image/png"},
+    )
+
+    assert uploaded.status_code == 200
+    assert uploaded.headers["content-type"] == "application/json"
+    uploaded_body = uploaded.json()
+    assert set(uploaded_body) == {
+        "assetId",
+        "kind",
+        "url",
+        "size",
+        "contentType",
+        "sha256",
+    }
+    assert "iv" not in uploaded_body
+    assert uploaded_body["assetId"] == asset_id
+    assert uploaded_body["sha256"] == hashlib.sha256(AVATAR_PAYLOAD).hexdigest()
+
+    complete_url = COMPLETE_URL.format(asset_id=asset_id)
+    completed = _send(
+        encrypted_client,
+        "POST",
+        complete_url,
+        {**_session_headers(session_id), **auth},
+        None,
+    )
+
+    assert completed.status_code == 200
+    assert completed.headers["content-type"] == ENCRYPTED_CONTENT_TYPE
+    completed_body = open_response(aes_key, 200, "", completed.json())
+    assert set(completed_body) == {
+        "assetId",
+        "kind",
+        "url",
+        "size",
+        "contentType",
+        "sha256",
+    }
+    assert completed_body["assetId"] == asset_id
+    assert completed_body["kind"] == "AVATAR"
+    assert completed_body["url"].startswith("/media/avatars/")
+    assert completed_body["sha256"] == hashlib.sha256(AVATAR_PAYLOAD).hexdigest()
