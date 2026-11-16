@@ -1,11 +1,12 @@
 """Reads of a stored media asset: the bytes, their metadata and their integrity.
 
 The upload route writes the bytes through one `StorageBackend`, and these routes read
-them back through the same seam: `StorageBackend.path_for` turns the row's storage key
-into a file `FileResponse` streams, so the router never touches a disk path or an SDK of
-its own. The bytes and the metadata are public -- a poster or backdrop has to load
-directly in the client -- and neither filters on `is_current`, so an asset superseded by
-a later upload of the same kind still serves its own bytes.
+them back through the same seam: `StorageBackend.exists` says whether the object is
+still there and `StorageBackend.open_stream` hands its bytes to a `StreamingResponse`, so
+the router never touches a disk path or an SDK of its own. The bytes and the metadata are
+public -- a poster or backdrop has to load directly in the client -- and neither filters
+on `is_current`, so an asset superseded by a later upload of the same kind still serves
+its own bytes.
 
 The integrity and verify routes are authenticated instead: they recompute the stored
 object's digest through `integrity_report` and write the resulting flag onto the row,
@@ -23,7 +24,7 @@ import secrets
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -35,14 +36,14 @@ from ..media import (
     MediaSettings,
     RequestStreamChunks,
     StorageBackend,
-    digest_of_file,
+    digest_of_stream,
     get_media_settings,
     get_storage_backend,
     integrity_report,
     max_bytes_for,
 )
 from ..models import MediaAsset, User
-from ..presign import PresignTokenError, decode_upload_token, upload_url
+from ..presign import PresignTokenError, decode_upload_token
 from ..reviews_client import ReviewsClient, ReviewsUnavailableError, get_reviews_client
 from ..schemas import (
     MediaAssetOut,
@@ -51,6 +52,7 @@ from ..schemas import (
     MediaPresignIn,
     MediaPresignOut,
     MediaPurpose,
+    MediaStorageHealthOut,
     MediaVerifyIn,
     MediaVerifyOut,
 )
@@ -100,27 +102,46 @@ def _normalise_content_type(raw: str) -> str:
     return raw.split(";")[0].strip().lower()
 
 
-@router.get("/{asset_id}", response_class=FileResponse)
+@router.get("/health/storage", response_model=MediaStorageHealthOut)
+def get_storage_health(
+    storage: StorageBackend = Depends(get_storage_backend),
+) -> MediaStorageHealthOut:
+    """Which backend holds the bytes and whether it answers right now.
+
+    Public and unauthenticated, and always a 200: an unreachable bucket is a state an
+    operator needs to read, not a failed request, so `reachable` reports it instead of
+    the status code. Declared above `/{asset_id}` because it is a fixed path.
+    """
+    health = storage.health()
+    return MediaStorageHealthOut(backend=health.backend, reachable=health.reachable)
+
+
+@router.get("/{asset_id}")
 def download_media_asset(
     asset_id: int,
     db: Session = Depends(get_db),
     storage: StorageBackend = Depends(get_storage_backend),
-) -> FileResponse:
-    """Stream the stored bytes; Starlette fills Content-Length from the file's stat.
+) -> StreamingResponse:
+    """Stream the stored bytes through the storage seam, whatever backend holds them.
 
-    A row created by a presign whose bytes never landed has no storage key, so there is
-    nothing to serve and the asset reads as missing rather than as a broken file.
+    A row created by a presign whose bytes never landed has no storage key, and an
+    object deleted from storage is just as absent, so both read as missing rather than
+    as a broken file. The length comes from the row, which is what an S3 head reports
+    too, so a bucket-backed asset answers the same headers a file on this host does.
     """
     asset = _get_asset(asset_id, db)
-    if not asset.storage_key:
+    if not asset.storage_key or not storage.exists(asset.storage_key):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Media asset not found: {asset_id}",
         )
-    return FileResponse(
-        path=storage.path_for(asset.storage_key),
+    return StreamingResponse(
+        storage.open_stream(asset.storage_key),
         media_type=asset.content_type,
-        headers={"Content-Disposition": "inline"},
+        headers={
+            "Content-Disposition": "inline",
+            "Content-Length": str(asset.size_bytes),
+        },
     )
 
 
@@ -128,13 +149,19 @@ def download_media_asset(
 def get_media_asset_metadata(
     asset_id: int,
     db: Session = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage_backend),
 ) -> MediaAssetOut:
-    """The asset's six public fields; its storage key and the bytes themselves stay out."""
+    """The asset's six public fields; its storage key and the bytes themselves stay out.
+
+    The url is asked of the backend on every read rather than echoed from the row: a
+    bucket-backed backend signs a fresh, short-lived GET url each time, so the value
+    stored at upload time would have expired by the time a client loaded it.
+    """
     asset = _get_asset(asset_id, db)
     return MediaAssetOut(
         assetId=asset.id,
         kind=MediaKind(asset.kind),
-        url=asset.url,
+        url=storage.public_url(asset.storage_key),
         size=asset.size_bytes,
         contentType=asset.content_type,
         sha256=asset.sha256,
@@ -152,13 +179,17 @@ def presign_media_upload(
     db: Session = Depends(get_db),
     settings: MediaSettings = Depends(get_media_settings),
     reviews: ReviewsClient = Depends(get_reviews_client),
+    storage: StorageBackend = Depends(get_storage_backend),
 ) -> MediaPresignOut:
     """Record a pending asset and answer the signed url the bytes are PUT to.
 
     An avatar belongs to the caller; a review photo belongs to the review named by
     `ownerId`, which is only accepted when the ratings service says the caller wrote
     it. The row exists before the bytes do, so the upload has an assetId to fill in and
-    `uploaded_at` stays NULL until they land.
+    `uploaded_at` stays NULL until they land. The url comes from the backend, so a
+    bucket-backed deployment hands the browser a signed PUT straight to S3 -- and the
+    destination key it names is recorded on the row, which is what completion then
+    heads to verify the bytes that arrived.
     """
     kind = _kind_for(payload.purpose)
     content_type = _normalise_content_type(payload.contentType)
@@ -225,20 +256,28 @@ def presign_media_upload(
         uploaded_at=None,
     )
     db.add(asset)
+    # The presigned url names the asset, so the row needs its id before signing.
+    db.flush()
+
+    presigned = storage.presigned_upload(
+        asset_id=asset.id,
+        kind=kind,
+        size=payload.size,
+        content_type=content_type,
+    )
+    # A backend that can name the destination before the bytes arrive (S3) records it
+    # now, so completion knows which object to head. The local backend derives its key
+    # from the bytes, so it answers an empty key and nothing is written.
+    if presigned.key:
+        asset.storage_key = presigned.key
     db.commit()
 
     return MediaPresignOut(
         assetId=asset.id,
-        uploadUrl=upload_url(
-            settings,
-            asset_id=asset.id,
-            kind=kind,
-            size=payload.size,
-            content_type=content_type,
-        ),
-        method="PUT",
+        uploadUrl=presigned.url,
+        method=presigned.method,
         expiresIn=settings.presign_expires_seconds,
-        headers={"Content-Type": content_type},
+        headers=presigned.headers,
     )
 
 
@@ -353,8 +392,10 @@ def complete_presigned_upload(
     """Verify the uploaded bytes, then make this asset the owner's current one.
 
     The row's owner has to be the caller: a bearer token alone is not authorization for
-    someone else's asset. The bytes have to be there, and they have to still be exactly
-    the bytes the upload recorded, so a replaced file is refused instead of linked.
+    someone else's asset. The bytes have to be there -- `storage.head` says so, and for a
+    bucket that is exactly the `head_object` a direct-to-S3 upload is verified with -- and
+    they have to still be the bytes the upload recorded, so a replaced object is refused
+    instead of linked.
     """
     asset = _get_asset(asset_id, db)
     if asset.user_id != user.id:
@@ -363,24 +404,39 @@ def complete_presigned_upload(
             detail=COMPLETE_FORBIDDEN_DETAIL,
         )
 
-    if not asset.storage_key or asset.uploaded_at is None:
+    if not asset.storage_key:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=UPLOAD_MISSING_DETAIL,
         )
-    path = storage.path_for(asset.storage_key)
-    if not path.is_file():
+    # Nothing recorded here is trusted from the client: the size and content type come
+    # from what storage reports about the object, not from the row's declaration.
+    head = storage.head(asset.storage_key)
+    if head is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=UPLOAD_MISSING_DETAIL,
         )
 
     kind = MediaKind(asset.kind)
-    sha256, size = digest_of_file(path=path, algorithm=settings.hash_algorithm)
+    sha256, size = digest_of_stream(
+        storage.open_stream(asset.storage_key), algorithm=settings.hash_algorithm
+    )
+    recorded_sha256 = asset.sha256
+    digest_differs = bool(recorded_sha256) and not secrets.compare_digest(
+        sha256, recorded_sha256
+    )
+    stored_type = (
+        asset.content_type
+        if head.content_type is None
+        else _normalise_content_type(head.content_type)
+    )
     if (
-        size != asset.size_bytes
-        or not secrets.compare_digest(sha256, asset.sha256)
+        head.size != asset.size_bytes
+        or size != asset.size_bytes
+        or stored_type != asset.content_type
         or asset.content_type not in ALLOWED_CONTENT_TYPES[kind]
+        or digest_differs
     ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -388,6 +444,12 @@ def complete_presigned_upload(
         )
 
     _demote_previous(asset, kind, db)
+    # A direct-to-S3 upload never passed through this API, so this is the first digest
+    # anything computed for it: it is what the row records from now on. When the row
+    # already carried one, it was just proved equal above.
+    asset.sha256 = sha256
+    if asset.uploaded_at is None:
+        asset.uploaded_at = datetime.now(timezone.utc)
     asset.is_current = True
     asset.verified = True
     db.commit()
@@ -395,7 +457,7 @@ def complete_presigned_upload(
     return MediaAssetOut(
         assetId=asset.id,
         kind=kind,
-        url=asset.url,
+        url=storage.public_url(asset.storage_key),
         size=asset.size_bytes,
         contentType=asset.content_type,
         sha256=asset.sha256,

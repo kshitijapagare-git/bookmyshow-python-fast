@@ -8,9 +8,16 @@ ones the upload just wrote.
 """
 
 import hashlib
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
+from app.db import SessionLocal
+from app.main import app
+from app.media import get_storage_backend
+from app.models import MediaAsset
 from app.security import MEDIA_SERVICE_TOKEN
 
 UPLOAD_URL = "/api/movies/{movie_id}/media"
@@ -113,6 +120,33 @@ def test_download_unknown_asset_is_404(client) -> None:
     assert body["instance"] == "/api/media/999999"
 
 
+def test_download_of_a_deleted_object_is_404(client) -> None:
+    """A row whose stored object is gone reads as missing, not as a broken file."""
+    asset = _upload(client, "POSTER", POSTER_PAYLOAD, "image/png")
+    asset_id = asset["assetId"]
+
+    with SessionLocal() as db:
+        row = db.get(MediaAsset, asset_id)
+        assert row is not None
+        storage_key = row.storage_key
+    assert storage_key
+
+    path = Path(app.state.media_settings.upload_dir) / storage_key
+    assert path.is_file()
+    path.unlink()
+
+    response = _download(client, asset_id)
+
+    assert response.status_code == 404
+    body = response.json()
+    assert set(body) == PROBLEM_DETAIL_KEYS
+    assert body["type"] == "about:blank"
+    assert body["title"] == "Not Found"
+    assert body["status"] == 404
+    assert body["detail"] == f"Media asset not found: {asset_id}"
+    assert body["instance"] == DOWNLOAD_URL.format(asset_id=asset_id)
+
+
 @pytest.mark.parametrize(
     ("kind", "content_type", "payload"),
     [
@@ -187,3 +221,52 @@ def test_metadata_unknown_asset_is_404(client) -> None:
     assert body["status"] == 404
     assert body["detail"] == "Media asset not found: 999999"
     assert body["instance"] == "/api/media/999999/metadata"
+
+
+class _SigningStorage:
+    """A backend that signs a fresh url on every read, exactly as the S3 one does."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def public_url(self, key: str) -> str:
+        self.calls += 1
+        return f"https://bucket.example/{key}?sig={self.calls}"
+
+
+@contextmanager
+def _use_storage(storage: object) -> Iterator[object]:
+    """Serve this backend to the media routes; the override is always popped again."""
+    app.dependency_overrides[get_storage_backend] = lambda: storage
+    try:
+        yield storage
+    finally:
+        app.dependency_overrides.pop(get_storage_backend, None)
+
+
+def test_metadata_url_is_generated_per_read(client) -> None:
+    """Each read asks the backend for its own url; the stored column is not served."""
+    asset = _upload(client, "POSTER", POSTER_PAYLOAD, "image/png")
+    asset_id = asset["assetId"]
+    with SessionLocal() as db:
+        row = db.get(MediaAsset, asset_id)
+        assert row is not None
+        storage_key = row.storage_key
+        stored_url = row.url
+    assert storage_key
+    stub = _SigningStorage()
+
+    with _use_storage(stub):
+        first = _metadata(client, asset_id)
+        second = _metadata(client, asset_id)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert stub.calls == 2
+    assert set(first.json()) == ASSET_KEYS
+    assert first.json()["url"] == f"https://bucket.example/{storage_key}?sig=1"
+    assert second.json()["url"] == f"https://bucket.example/{storage_key}?sig=2"
+    # Two reads, two urls, and neither is the value the row stores.
+    assert first.json()["url"] != second.json()["url"]
+    assert first.json()["url"] != stored_url
+

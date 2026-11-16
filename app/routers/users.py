@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
+from ..media import StorageBackend, get_storage_backend
 from ..models import MediaAsset, User
 from ..schemas import MediaAssetOut, MediaKind, UserOut
 from ..security import get_current_user
@@ -36,11 +37,14 @@ def lookup_user(
 def get_my_avatar(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    storage: StorageBackend = Depends(get_storage_backend),
 ) -> MediaAssetOut:
     """The caller's current avatar, in the same shape completion answered with.
 
     A reload has no memory of the completion response, so the persisted row is read
     back here rather than folded into `UserOut`, which the `/api/me` contract fixes.
+    The url is asked of the backend at read time, because a bucket-backed backend signs
+    a short-lived GET url that the stored column could never hold.
     """
     asset = db.scalars(
         select(MediaAsset)
@@ -60,7 +64,7 @@ def get_my_avatar(
     return MediaAssetOut(
         assetId=asset.id,
         kind=MediaKind.AVATAR,
-        url=asset.url,
+        url=storage.public_url(asset.storage_key),
         size=asset.size_bytes,
         contentType=asset.content_type,
         sha256=asset.sha256,

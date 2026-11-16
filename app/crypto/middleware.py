@@ -20,7 +20,16 @@ from .envelope import Envelope, open_envelope, request_aad, response_aad, seal
 from .keys import ServerKeyPair
 from .sessions import Session, SessionStore
 
-PUBLIC_PATHS = frozenset({"/api/crypto/public-key", "/api/crypto/session"})
+PUBLIC_PATHS = frozenset(
+    {
+        "/api/crypto/public-key",
+        "/api/crypto/session",
+        # The storage health report is public and unauthenticated, so it has to read
+        # without an encryption session too: it is the operator's first probe of a
+        # deployment, before any client handshake could exist.
+        "/api/media/health/storage",
+    }
+)
 MEDIA_UPLOAD_PATH = re.compile(r"^/api/movies/\d+/media$")
 REVIEW_PHOTO_UPLOAD_PATH = re.compile(r"^/api/movies/\d+/reviews/\d+/photo$")
 PRESIGN_UPLOAD_PATH = re.compile(r"^/api/media/\d+/upload$")
