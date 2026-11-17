@@ -398,6 +398,80 @@ def test_minio_round_trip_put_get_stream_delete_exists(prefix: str) -> None:
     backend.delete(stored.key)
 
 
+def test_minio_stream_exists_and_presigned_put_and_get() -> None:
+    """Stream, existence and both signed urls, asserted against the recorded calls.
+
+    A ranged read is one `Range: bytes=start-end` of the same object and an un-ranged
+    read sends no Range at all; `exists` is a head, so a missing key costs no download;
+    and neither signed url carries a public ACL or an SSE knob this bucket was never
+    configured for.
+    """
+    settings = _minio_settings()
+    fake = FakeMinioClient()
+    backend = MinioStorageBackend(settings, client=fake)
+
+    payload = bytes(range(10))
+    stored = _save_exact(backend, payload)
+
+    assert b"".join(backend.open_stream(stored.key)) == payload
+    # No range means no Range header: the whole object comes back.
+    assert fake.get_calls[-1] == {
+        "Bucket": MINIO_BUCKET,
+        "Key": stored.key,
+        "Range": None,
+    }
+
+    assert (
+        b"".join(backend.open_stream(stored.key, ByteRange(start=2, end=4)))
+        == payload[2:5]
+    )
+    assert fake.get_calls[-1] == {
+        "Bucket": MINIO_BUCKET,
+        "Key": stored.key,
+        "Range": "bytes=2-4",
+    }
+
+    assert backend.exists(stored.key) is True
+    assert backend.exists(MISSING_KEY) is False
+    # Existence is one head of the present key; the missing one is never read.
+    assert fake.head_calls == [{"Bucket": MINIO_BUCKET, "Key": stored.key}]
+    assert [call["Key"] for call in fake.get_calls] == [stored.key, stored.key]
+
+    presigned = backend.presigned_upload(
+        asset_id=7,
+        kind=MediaKind.AVATAR,
+        size=len(AVATAR_BYTES),
+        content_type=CONTENT_TYPE,
+    )
+
+    put_call = fake.presigned_calls[-1]
+    assert put_call["method"] == "put_object"
+    assert put_call["expires_in"] == settings.presign_expires_seconds == 900
+    assert put_call["params"] == {
+        "Bucket": MINIO_BUCKET,
+        "Key": "avatars/7.png",
+        "ContentType": CONTENT_TYPE,
+    }
+    # A presigned PUT never carries a public ACL, and no SSE knob is configured.
+    assert "ACL" not in put_call["params"]
+    assert "ServerSideEncryption" not in put_call["params"]
+    assert presigned.method == "PUT"
+    assert presigned.url.startswith(
+        f"{MINIO_ENDPOINT_URL}/{MINIO_BUCKET}/avatars/7.png?"
+    )
+    assert "X-Amz-Expires=900" in presigned.url
+
+    url = backend.public_url(stored.key)
+
+    get_call = fake.presigned_calls[-1]
+    assert get_call["method"] == "get_object"
+    assert get_call["expires_in"] == settings.presign_expires_seconds
+    assert get_call["params"] == {"Bucket": MINIO_BUCKET, "Key": stored.key}
+    assert "ACL" not in get_call["params"]
+    assert url.startswith(f"{MINIO_ENDPOINT_URL}/{MINIO_BUCKET}/{stored.key}?")
+    assert "X-Amz-Expires=900" in url
+
+
 def test_minio_presigned_put_and_get_respect_expiry() -> None:
     """Both signed urls come from the MinIO endpoint and carry the configured expiry."""
     settings = _minio_settings()
@@ -489,6 +563,41 @@ def test_minio_creates_the_bucket_once_when_configured() -> None:
         _save(failing, AVATAR_BYTES)
 
     assert broken.put_calls == []
+
+
+def test_minio_create_bucket_is_honoured_in_every_environment(monkeypatch) -> None:
+    """`MINIO_CREATE_BUCKET` is honoured whatever the environment calls itself.
+
+    The decision behind this ticket is that the flag applies in every environment, and
+    nothing in the app reads a deployment mode at all: this guard fails if an
+    environment check is ever slipped into the bucket creation.
+    """
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+
+    created = FakeMinioClient(buckets=())
+    backend = MinioStorageBackend(
+        _minio_settings(minio_create_bucket=True), client=created
+    )
+
+    _save(backend, AVATAR_BYTES)
+
+    # One probe found the bucket missing, one creation answered it, and the put landed.
+    assert created.head_bucket_calls == [{"Bucket": MINIO_BUCKET}]
+    assert created.create_bucket_calls == [{"Bucket": MINIO_BUCKET}]
+    assert [call["Bucket"] for call in created.put_calls] == [MINIO_BUCKET]
+
+    # The same production environment with the flag off creates and probes nothing.
+    off = FakeMinioClient(buckets=())
+    plain = MinioStorageBackend(
+        _minio_settings(minio_create_bucket=False), client=off
+    )
+
+    _save(plain, AVATAR_BYTES)
+
+    assert off.head_bucket_calls == []
+    assert off.create_bucket_calls == []
+    assert [call["Bucket"] for call in off.put_calls] == [MINIO_BUCKET]
 
 
 def _stub_boto3(monkeypatch) -> list[dict[str, object]]:
