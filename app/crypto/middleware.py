@@ -12,6 +12,7 @@ import time
 
 from cryptography.exceptions import InvalidTag
 from starlette.responses import JSONResponse, Response
+from starlette.routing import Match
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..errors import problem_detail_content
@@ -102,6 +103,26 @@ def _path_with_query(scope: Scope) -> str:
     return f"{path}?{query.decode('latin-1')}"
 
 
+def _is_unserved(scope: Scope) -> bool:
+    """Whether no route of this app matches the request at all.
+
+    A path nothing serves has no route to hand a session to and no body to protect, so
+    answering it with a 428 would hide the app's own ProblemDetail 404 -- the answer an
+    unregistered docs path gets, with or without the encryption layer. Anything that
+    matches a route stays guarded, including a partial match for the wrong method.
+    """
+    application = scope.get("app")
+    routes = getattr(application, "routes", None)
+    if not routes:
+        return False
+    for route in routes:
+        matched = route.matches(scope)
+        match = matched[0] if isinstance(matched, tuple) else matched
+        if match is not Match.NONE:
+            return False
+    return True
+
+
 async def _read_body(receive: Receive) -> bytes:
     chunks: list[bytes] = []
     while True:
@@ -146,17 +167,29 @@ class CryptoMiddleware:
     """Hybrid encryption transport: RSA-OAEP handshake, AES-256-GCM bodies."""
 
     def __init__(
-        self, app: ASGIApp, *, keys: ServerKeyPair, sessions: SessionStore
+        self,
+        app: ASGIApp,
+        *,
+        keys: ServerKeyPair,
+        sessions: SessionStore,
+        public_paths: frozenset[str] = PUBLIC_PATHS,
     ) -> None:
         self.app = app
         self.keys = keys
         self.sessions = sessions
+        # The paths this app serves without an encryption session: `PUBLIC_PATHS` plus
+        # whatever `create_app` adds for this deployment, such as the configured docs
+        # routes. Matching stays exact-path equality, so a sub-path is not exempt.
+        self.public_paths = public_paths
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
             scope["type"] != "http"
-            or scope.get("path") in PUBLIC_PATHS
+            or scope.get("path") in self.public_paths
             or scope.get("path", "").startswith(INTERNAL_PREFIX)
+            # A path this app serves no route for is not something to guard: it falls
+            # through to the app's own plain 404 rather than the middleware's 428.
+            or _is_unserved(scope)
         ):
             await self.app(scope, receive, send)
             return

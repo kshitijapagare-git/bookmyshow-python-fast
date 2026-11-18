@@ -5,9 +5,10 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from .config import DocsSettings
 from .crypto.config import CryptoSettings
 from .crypto.keys import load_key_pair
-from .crypto.middleware import CryptoMiddleware
+from .crypto.middleware import PUBLIC_PATHS, CryptoMiddleware
 from .crypto.sessions import SessionStore
 from .db import Base, SessionLocal, engine
 from .delivery import DeliveryPolicy
@@ -115,10 +116,24 @@ async def lifespan(_app: FastAPI):
             _app.state.rabbit_publisher.close()
 
 
-def create_app(settings: CryptoSettings | None = None) -> FastAPI:
+def create_app(
+    settings: CryptoSettings | None = None, docs: DocsSettings | None = None
+) -> FastAPI:
     """Build the app; the crypto key pair and session store live on app.state."""
     resolved = settings if settings is not None else CryptoSettings.from_env()
-    application = FastAPI(title="BookMyShow API", version="0.1.0", lifespan=lifespan)
+    docs_settings = docs if docs is not None else DocsSettings.from_env()
+    # FastAPI registers Swagger UI, ReDoc and the OpenAPI document only for the paths it
+    # is given, so switching documentation off means passing None for all three: each
+    # path then falls through to the app's own ProblemDetail 404 rather than an HTML page.
+    application = FastAPI(
+        title="BookMyShow API",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=docs_settings.docs_url if docs_settings.enabled else None,
+        redoc_url=docs_settings.redoc_url if docs_settings.enabled else None,
+        openapi_url=docs_settings.openapi_url if docs_settings.enabled else None,
+    )
+    application.state.docs_settings = docs_settings
     application.state.crypto_keys = load_key_pair(resolved)
     application.state.crypto_sessions = SessionStore()
     application.state.payments_settings = PaymentsSettings.from_env()
@@ -146,6 +161,9 @@ def create_app(settings: CryptoSettings | None = None) -> FastAPI:
             CryptoMiddleware,
             keys=application.state.crypto_keys,
             sessions=application.state.crypto_sessions,
+            # The configured docs paths are exempt whether or not documentation is
+            # switched on, so a disabled deployment's plain 404 never becomes a 428.
+            public_paths=PUBLIC_PATHS | docs_settings.bypass_paths(),
         )
 
     register_error_handlers(application)
