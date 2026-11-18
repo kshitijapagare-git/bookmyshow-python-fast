@@ -30,6 +30,7 @@ PUBLIC_PATHS = frozenset(
         "/api/media/health/storage",
     }
 )
+INTERNAL_PREFIX = "/internal/"
 MEDIA_UPLOAD_PATH = re.compile(r"^/api/movies/\d+/media$")
 REVIEW_PHOTO_UPLOAD_PATH = re.compile(r"^/api/movies/\d+/reviews/\d+/photo$")
 PRESIGN_UPLOAD_PATH = re.compile(r"^/api/media/\d+/upload$")
@@ -152,7 +153,11 @@ class CryptoMiddleware:
         self.sessions = sessions
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope.get("path") in PUBLIC_PATHS:
+        if (
+            scope["type"] != "http"
+            or scope.get("path") in PUBLIC_PATHS
+            or scope.get("path", "").startswith(INTERNAL_PREFIX)
+        ):
             await self.app(scope, receive, send)
             return
 
